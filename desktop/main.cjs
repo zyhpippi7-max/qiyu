@@ -362,7 +362,9 @@ function createWindow() {
     backgroundColor: "#eef3f9", icon: path.join(__dirname, "build", "icon.png"),
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-  mainWindow.setWindowButtonVisibility(true);
+  // This BrowserWindow method exists on macOS only. Calling it on Windows
+  // aborts startup after the native shell has opened, leaving a blank window.
+  if (process.platform === "darwin") mainWindow.setWindowButtonVisibility(true);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { if (!url.startsWith(activeServer)) shell.openExternal(url); else mainWindow.loadURL(url); return { action: "deny" }; });
   mainWindow.on("close", event => { if (!app.isQuitting) { event.preventDefault(); mainWindow.hide(); } });
   startApplication().catch(error => {

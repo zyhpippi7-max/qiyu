@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.8 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.9 desktop assistant", async () => {
   const [packageText, agentText, helperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -34,7 +34,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.8 desktop assi
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.8");
+  assert.equal(packageJson.version, "0.5.9");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -269,6 +269,7 @@ test("handles desktop authentication, connection recovery, and image size ratios
   assert.match(desktop, /async function loadServerPage/);
   assert.match(desktop, /网页加载超过 15 秒/);
   assert.match(desktop, /qiyu:open-external/);
+  assert.match(desktop, /process\.platform === "darwin"\) mainWindow\.setWindowButtonVisibility/);
   assert.match(desktop, /checkPermissionsAndRecord/);
   assert.match(desktop, /showAndRecheckPermissions/);
   assert.match(desktop, /lastPermissionCheckAt/);
