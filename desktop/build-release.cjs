@@ -19,8 +19,8 @@ const builder = path.join(
 );
 
 const args = target === "mac"
-  ? ["--mac", "dmg", "zip", "--arm64"]
-  : ["--win", "nsis", "zip", "--x64"];
+  ? ["--mac", "dmg", "zip", "--arm64", "--publish", "never"]
+  : ["--win", "nsis", "zip", "--x64", "--publish", "never"];
 
 try {
   execFileSync(builder, [
