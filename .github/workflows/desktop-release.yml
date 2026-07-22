@@ -1,0 +1,80 @@
+name: Publish Desktop App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update, for example v0.5.8"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  windows-release:
+    name: Build Windows installer and publish release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Enable Corepack
+        shell: pwsh
+        run: corepack enable
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: corepack pnpm@11.15.1 install --frozen-lockfile
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: corepack pnpm@11.15.1 run desktop:pack:win
+
+      - name: Validate release files
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v') {
+            throw "Release tag must start with v."
+          }
+          $assets = @(Get-ChildItem -Path "desktop-dist" -File | Where-Object { $_.Extension -in ".exe", ".zip" })
+          if ($assets.Count -eq 0) {
+            throw "No Windows installer files were created."
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QiyuAI-Windows-${{ env.RELEASE_TAG }}
+          path: |
+            desktop-dist/*.exe
+            desktop-dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem -Path "desktop-dist" -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object { $_.FullName })
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --title "QiyuAI $env:RELEASE_TAG" --generate-notes --target $env:GITHUB_SHA
+          }

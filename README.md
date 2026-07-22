@@ -18,6 +18,12 @@ npm run build
 
 This starter does not use `wrangler.jsonc`.
 
+## 下载 Windows 桌面端
+
+普通用户不需要克隆源码。请从 [GitHub Releases](https://github.com/zyhpippi7-max/qiyu/releases) 下载最新的 `QiyuAI-*-x64.exe` 安装包，运行后按安装向导完成安装。
+
+维护者推送 `v*` 格式的版本标签（例如 `v0.5.8`）后，GitHub Actions 会在 Windows 环境构建安装包，并将 `.exe` 和 `.zip` 上传到对应 Release。未配置代码签名时，Windows 可能显示“未知发布者”提示。
+
 ## Included Shape
 
 - edit site code under `app/`

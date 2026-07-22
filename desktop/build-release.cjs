@@ -26,7 +26,11 @@ try {
   execFileSync(builder, [
     ...args,
     `--config.directories.output=${temporaryOutput}`,
-  ], { cwd: root, stdio: "inherit" });
+  ], {
+    cwd: root,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
 
   if (target === "mac") {
     const appPath = path.join(temporaryOutput, "mac-arm64", "奇遇AI.app");
