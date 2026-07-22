@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("probe", "open", "focus-contact", "paste-draft", "paste-send", "scan-contacts", "scan-inbox", "scan-history", "open-moments")]
   [string]$Mode,
@@ -43,8 +43,12 @@ function Find-WeChatProcess([switch]$IncludeBackground) {
 function Add-WeChatPath([System.Collections.Generic.List[string]]$Paths, [string]$Candidate) {
   if (-not $Candidate) { return }
   $value = $Candidate.Trim().Trim('"')
+  if ($value.StartsWith('\"')) { $value = $value.Substring(2) }
+  if ($value.EndsWith('\"')) { $value = $value.Substring(0, $value.Length - 2) }
   if ($value -match '^(.+?\.exe)(?:,\d+)?$') { $value = $Matches[1].Trim('"') }
-  if ((Test-Path -LiteralPath $value -PathType Leaf) -and -not $Paths.Contains($value)) { [void]$Paths.Add($value) }
+  try {
+    if ((Test-Path -LiteralPath $value -PathType Leaf) -and -not $Paths.Contains($value)) { [void]$Paths.Add($value) }
+  } catch {}
 }
 
 function Get-WeChatLaunchPaths {
@@ -61,8 +65,12 @@ function Get-WeChatLaunchPaths {
   )) { try { Add-WeChatPath $paths ((Get-Item $key -ErrorAction Stop).GetValue("")) } catch {} }
   foreach ($root in @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*")) {
     Get-ItemProperty $root -ErrorAction SilentlyContinue | Where-Object { "$($_.DisplayName)" -match "微信|WeChat|Weixin" } | ForEach-Object {
-      Add-WeChatPath $paths $_.DisplayIcon
-      foreach ($file in @("WeChat.exe", "Weixin.exe", "WeChatAppEx.exe")) { if ($_.InstallLocation) { Add-WeChatPath $paths (Join-Path $_.InstallLocation $file) } }
+      try { Add-WeChatPath $paths $_.DisplayIcon } catch {}
+      foreach ($file in @("WeChat.exe", "Weixin.exe", "WeChatAppEx.exe")) {
+        if ($_.InstallLocation) {
+          try { Add-WeChatPath $paths (Join-Path -Path $_.InstallLocation -ChildPath $file -ErrorAction Stop) } catch {}
+        }
+      }
     }
   }
   try {
