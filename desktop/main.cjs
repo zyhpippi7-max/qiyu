@@ -174,20 +174,21 @@ async function reachable(server) {
 
 async function chooseServer() {
   const config = readConfig();
-  // Development builds may deliberately point at a local tunnel, but that
-  // address must never survive into a packaged customer build.  Keeping an
-  // old 127.0.0.1 value made the shell load while protected management APIs
-  // returned 401, so the sidebar and the device page disagreed.
-  const configuredServer = app.isPackaged && /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(String(config.server || ""))
-    ? ""
-    : config.server;
+  // A packaged assistant may legitimately run beside a locally hosted Qiyu
+  // workspace.  Keep an explicitly saved local address, but only use it when
+  // the automation API is reachable; otherwise continue to the hosted fallback.
+  const configuredServer = String(config.server || "").trim();
   const candidates = [process.env.QIYU_SERVER_URL, configuredServer, "https://xcx.qiyuai.com.cn", "http://localhost:3000"].filter(Boolean);
   for (const candidate of [...new Set(candidates)]) if (await reachable(candidate)) return candidate.replace(/\/$/, "");
   return configuredServer || "https://xcx.qiyuai.com.cn";
 }
 
-function offlineHtml(server) {
-  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:radial-gradient(circle at 20% 15%,#cce4ff,transparent 38%),radial-gradient(circle at 85% 20%,#e3d6ff,transparent 42%),#eef3f9;color:#272935}.card{width:min(560px,calc(100% - 40px));padding:38px;border:1px solid rgba(255,255,255,.9);border-radius:28px;background:rgba(255,255,255,.62);box-shadow:0 25px 70px rgba(50,60,90,.16);backdrop-filter:blur(28px)}h1{font-size:30px;margin:0 0 12px}p{color:#737785;line-height:1.7}input{width:100%;padding:14px;border:1px solid #dfe2eb;border-radius:14px;font-size:15px}button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:14px;color:white;background:#7052dc;font-size:15px;font-weight:700}</style><body><div class="card"><h1>奇遇AI正在连接服务器</h1><p>当前地址：${server}<br>请确认服务器和HTTPS已经部署，或者填写新的奇遇AI网站地址。</p><input id="server" value="${server}"><button onclick="connect()">保存并重新连接</button><script>async function connect(){const value=document.getElementById('server').value;await window.qiyuDesktop.chooseServer(value);}</script></div></body></html>`;
+const escapeHtml = value => String(value || "").replace(/[&<>"']/g, character => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" })[character]);
+
+function offlineHtml(server, reason = "") {
+  const safeServer = escapeHtml(server);
+  const safeReason = reason ? `<p class="reason">${escapeHtml(reason)}</p>` : "";
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:radial-gradient(circle at 20% 15%,#cce4ff,transparent 38%),radial-gradient(circle at 85% 20%,#e3d6ff,transparent 42%),#eef3f9;color:#272935}.card{width:min(560px,calc(100% - 40px));padding:38px;border:1px solid rgba(255,255,255,.9);border-radius:28px;background:rgba(255,255,255,.62);box-shadow:0 25px 70px rgba(50,60,90,.16);backdrop-filter:blur(28px)}h1{font-size:30px;margin:0 0 12px}p{color:#737785;line-height:1.7}.reason{padding:10px 12px;border-radius:12px;background:#fff0df;color:#9a572e}input{width:100%;padding:14px;border:1px solid #dfe2eb;border-radius:14px;font-size:15px}button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:14px;color:white;background:#7052dc;font-size:15px;font-weight:700}button.secondary{color:#6044cb;background:#eeeaff}</style><body><div class="card"><h1>奇遇AI暂时无法显示网页</h1><p>当前地址：${safeServer}<br>请确认服务器可访问，或者填写新的奇遇AI网站地址。</p>${safeReason}<input id="server" value="${safeServer}"><button onclick="connect()">保存并重新连接</button><button class="secondary" onclick="openInBrowser()">在浏览器打开网站</button><script>async function connect(){const value=document.getElementById('server').value;await window.qiyuDesktop.chooseServer(value);}async function openInBrowser(){await window.qiyuDesktop.openExternal(document.getElementById('server').value);}</script></div></body></html>`;
 }
 
 function onboardingHtml() {
@@ -285,13 +286,39 @@ async function showLogin(invalid = false) {
   } finally { showingLogin = false; }
 }
 
+async function loadServerPage(server) {
+  let showingRecovery = false;
+  let timeout;
+  const showRecovery = async reason => {
+    if (showingRecovery || !mainWindow || mainWindow.isDestroyed()) return;
+    showingRecovery = true;
+    lastStatus = { message: reason };
+    rebuildTray();
+    mainWindow.webContents.stop();
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(offlineHtml(server, reason))}`);
+  };
+  const onFailLoad = (_event, _code, description, _validatedUrl, isMainFrame) => {
+    if (isMainFrame !== false) showRecovery(`网页加载失败：${description || "未知网络错误"}`).catch(() => {});
+  };
+  mainWindow.webContents.once("did-fail-load", onFailLoad);
+  timeout = setTimeout(() => showRecovery("网页加载超过 15 秒，已停止等待。你可以重连或在浏览器打开网站。").catch(() => {}), 15000);
+  try {
+    await mainWindow.loadURL(server);
+  } catch (error) {
+    if (!showingRecovery) await showRecovery(`网页加载失败：${error?.message || "未知错误"}`);
+  } finally {
+    clearTimeout(timeout);
+    mainWindow.webContents.removeListener("did-fail-load", onFailLoad);
+  }
+  return !showingRecovery;
+}
+
 async function connect() {
   activeServer = await chooseServer();
   if (await reachable(activeServer)) {
     writeConfig({ ...readConfig(), server: activeServer });
     authAttempted = false;
-    try { await mainWindow.loadURL(activeServer); }
-    catch (error) { if (!mainWindow.webContents.getURL().startsWith("data:text/html")) throw error; }
+    await loadServerPage(activeServer);
     agent?.stop();
     agent = new QiyuAgent({ server: activeServer, basicAuth: readCredentials(), onStatus: status => { lastStatus = status; rebuildTray(); } });
     agent.start().catch(error => { lastStatus = { message: error.message }; rebuildTray(); });
@@ -369,6 +396,11 @@ app.on("before-quit", () => { app.isQuitting = true; agent?.stop(); });
 ipcMain.handle("qiyu:get-status", () => ({ server: activeServer, ...lastStatus }));
 ipcMain.handle("qiyu:get-permissions", () => permissionStatus());
 ipcMain.handle("qiyu:retry", () => connect());
+ipcMain.handle("qiyu:open-external", async (_, url) => {
+  if (!/^https?:\/\//i.test(String(url || ""))) return { ok:false, error:"地址必须以 http:// 或 https:// 开头" };
+  await shell.openExternal(String(url));
+  return { ok:true };
+});
 ipcMain.handle("qiyu:pair-device", async (_, code) => {
   const pairingCode = String(code || "").replace(/\s+/g, "").toUpperCase();
   if (!pairingCode) return { ok:false, error:"请输入一次性配对码" };

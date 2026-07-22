@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.7 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.8 desktop assistant", async () => {
   const [packageText, agentText, helperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -34,7 +34,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.7 desktop assi
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.7");
+  assert.equal(packageJson.version, "0.5.8");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -250,7 +250,7 @@ test("keeps private-domain builder forms compact and uses task-specific labels",
   assert.match(css, /\.builder-name-field>input\{height:50px;/);
 });
 
-test("handles desktop authentication and presents image sizes as ratios", async () => {
+test("handles desktop authentication, connection recovery, and image size ratios", async () => {
   const [desktop, preload, modules] = await Promise.all([
     readFile(new URL("desktop/main.cjs", root), "utf8"),
     readFile(new URL("desktop/preload.cjs", root), "utf8"),
@@ -264,8 +264,11 @@ test("handles desktop authentication and presents image sizes as ratios", async 
   assert.match(desktop, /keychainService = "com\.qiyuai\.desktop\.http-auth"/);
   assert.match(desktop, /authFormat: 3/);
   assert.match(desktop, /delete next\.authPassword/);
-  assert.match(desktop, /const configuredServer = app\.isPackaged/);
-  assert.match(desktop, /127\\\.0\\\.0\\\.1/);
+  assert.match(desktop, /const configuredServer = String\(config\.server \|\| ""\)\.trim\(\)/);
+  assert.match(desktop, /http:\/\/localhost:3000/);
+  assert.match(desktop, /async function loadServerPage/);
+  assert.match(desktop, /网页加载超过 15 秒/);
+  assert.match(desktop, /qiyu:open-external/);
   assert.match(desktop, /checkPermissionsAndRecord/);
   assert.match(desktop, /showAndRecheckPermissions/);
   assert.match(desktop, /lastPermissionCheckAt/);
@@ -279,6 +282,7 @@ test("handles desktop authentication and presents image sizes as ratios", async 
   assert.match(desktop, /已经开启的权限不会重复提示/);
   assert.match(desktop, /重新检测权限/);
   assert.match(preload, /setCredentials/);
+  assert.match(preload, /openExternal/);
   for (const ratio of ["1:1", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"]) assert.match(modules, new RegExp(`value: "${ratio}"`));
   assert.match(modules, /不需要理解像素尺寸/);
   assert.match(modules, /cropImageToRatio/);
