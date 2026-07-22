@@ -1,0 +1,9 @@
+# 所有改动必须由仓库负责人审核。
+* @xiaozhangasd-hue
+
+# 高风险区域保持负责人所有权。
+/app/api/ @xiaozhangasd-hue
+/db/ @xiaozhangasd-hue
+/drizzle/ @xiaozhangasd-hue
+/desktop/ @xiaozhangasd-hue
+/deploy/ @xiaozhangasd-hue

@@ -1,0 +1,119 @@
+{
+  "name": "site-creator-vinext-starter",
+  "version": "0.5.7",
+  "description": "奇遇AI一体化桌面客户端与自动化助手",
+  "author": "奇遇AI",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "test": "pnpm run build && node --test tests/rendered-html.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "db:generate": "drizzle-kit generate",
+    "desktop:dev": "electron desktop/main.cjs",
+    "desktop:pack:mac": "node desktop/build-release.cjs mac",
+    "desktop:pack:win": "node desktop/build-release.cjs win",
+    "desktop:pack:all": "pnpm run desktop:pack:mac && pnpm run desktop:pack:win"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "drizzle-orm": "0.45.2",
+    "lucide-react": "^1.24.0",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "drizzle-kit": "0.31.10",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "png-to-ico": "^3.0.2",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "8.0.13",
+    "wrangler": "4.92.0"
+  },
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "build": {
+    "afterPack": "desktop/after-pack.cjs",
+    "appId": "com.qiyuai.desktop",
+    "productName": "奇遇AI",
+    "artifactName": "QiyuAI-${version}-${arch}.${ext}",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "desktop/bin/**",
+      "desktop/windows/**"
+    ],
+    "directories": {
+      "output": "desktop-dist",
+      "buildResources": "desktop/build"
+    },
+    "mac": {
+      "icon": "desktop/build/icon.icns",
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null,
+      "hardenedRuntime": false
+    },
+    "win": {
+      "icon": "desktop/build/icon.ico",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "奇遇AI",
+      "installerLanguages": [
+        "zh_CN"
+      ]
+    },
+    "dmg": {
+      "title": "安装奇遇AI",
+      "backgroundColor": "#eef3ff",
+      "iconSize": 104,
+      "contents": [
+        {
+          "x": 155,
+          "y": 185,
+          "type": "file"
+        },
+        {
+          "x": 445,
+          "y": 185,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  }
+}
