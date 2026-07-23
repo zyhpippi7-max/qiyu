@@ -214,24 +214,96 @@ function Read-VisibleListNames($List) {
   return $output
 }
 
-function Open-WeChatContacts($Root) {
-  $contactsTab = Find-ByName $Root @("通讯录", "联系人", "Contacts", "Address Book")
-  if ($contactsTab -and (Click-Element $contactsTab)) {
-    Start-Sleep -Milliseconds 900
-    return "uia_control"
-  }
+function Find-LeftNavigationByName($Root, [string[]]$Names) {
+  if (-not $Root) { return $null }
   try {
     $bounds = $Root.Current.BoundingRectangle
-    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return "" }
-    # Recent Windows WeChat builds sometimes hide the navigation icon from UI Automation.
-    # The second item in WeChat's fixed left navigation rail is the contacts view.
-    $x = [int]($bounds.X + [Math]::Max(28, [Math]::Min(46, $bounds.Width * 0.06)))
-    $y = [int]($bounds.Y + [Math]::Max(135, [Math]::Min(185, $bounds.Height * 0.23)))
-    [QiyuMouse]::Click($x, $y)
-    Start-Sleep -Milliseconds 900
-    return "left_navigation_fallback"
+    $maxX = $bounds.X + [Math]::Min(150, [Math]::Max(80, $bounds.Width * 0.18))
+    $minY = $bounds.Y + 45
+    $maxY = $bounds.Y + [Math]::Min($bounds.Height * 0.62, 520)
+    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        $name = ([string]$element.Current.Name).Trim()
+        if ($Names -notcontains $name) { continue }
+        $rect = $element.Current.BoundingRectangle
+        $centerX = $rect.X + $rect.Width / 2
+        $centerY = $rect.Y + $rect.Height / 2
+        if ($rect.Width -gt 2 -and $rect.Height -gt 2 -and $centerX -le $maxX -and $centerY -ge $minY -and $centerY -le $maxY) { return $element }
+      } catch {}
+    }
   } catch {}
-  return ""
+  return $null
+}
+
+function Test-WeChatContactsView($Root) {
+  if (-not $Root) { return $false }
+  $contactTab = Find-LeftNavigationByName $Root @("通讯录", "联系人", "Contacts", "Address Book")
+  if ($contactTab) {
+    try {
+      $pattern = $contactTab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+      if ($pattern.Current.IsSelected) { return $true }
+    } catch {}
+  }
+  # These labels belong to the contacts page rather than the chat list.  Do not
+  # use arbitrary list text as proof, otherwise chat titles are imported as contacts.
+  $markers = @("新的朋友", "群聊", "标签", "公众号", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    $found = New-Object System.Collections.Generic.HashSet[string]
+    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        $name = ([string]$element.Current.Name).Trim()
+        $rect = $element.Current.BoundingRectangle
+        $centerX = $rect.X + $rect.Width / 2
+        # Contacts markers live in the left content pane.  Ignoring the right
+        # conversation pane prevents a chat title from being used as evidence.
+        if ($markers -contains $name -and $centerX -ge ($bounds.X + 50) -and $centerX -le ($bounds.X + $bounds.Width * 0.55)) { $found.Add($name) | Out-Null }
+      } catch {}
+    }
+    if ($found.Count -ge 2) { return $true }
+  } catch {}
+  return $false
+}
+
+function Wait-ForWeChatContactsView([int]$Attempts = 4) {
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    $root = Get-WeChatRoot
+    if (Test-WeChatContactsView $root) { return $root }
+    Start-Sleep -Milliseconds 550
+  }
+  return $null
+}
+
+function Open-WeChatContacts($Root) {
+  $contactsTab = Find-LeftNavigationByName $Root @("通讯录", "联系人", "Contacts", "Address Book")
+  if ($contactsTab -and (Click-Element $contactsTab)) {
+    $verifiedRoot = Wait-ForWeChatContactsView
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "uia_navigation" } }
+  }
+  try {
+    # WeChat's desktop navigation uses Ctrl+2 for contacts in builds that do not
+    # expose the icon to UI Automation.  Verification is still mandatory below.
+    Activate-WeChat | Out-Null
+    [System.Windows.Forms.SendKeys]::SendWait("^2")
+    $verifiedRoot = Wait-ForWeChatContactsView
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "keyboard_shortcut" } }
+  } catch {}
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
+    # The chat icon and contacts icon move between WeChat versions.  Probe only
+    # the likely contacts slots, and continue only after the contacts page is verified.
+    $x = [int]($bounds.X + [Math]::Max(28, [Math]::Min(52, $bounds.Width * 0.065)))
+    foreach ($offset in @(180, 225, 270)) {
+      $y = [int]($bounds.Y + [Math]::Min($offset, [Math]::Max(150, $bounds.Height * 0.34)))
+      [QiyuMouse]::Click($x, $y)
+      $verifiedRoot = Wait-ForWeChatContactsView
+      if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "left_navigation_fallback" } }
+    }
+  } catch {}
+  return $null
 }
 
 function Wait-ForWeChatContactList([int]$Attempts = 12) {
@@ -239,6 +311,10 @@ function Wait-ForWeChatContactList([int]$Attempts = 12) {
   $lastList = $null
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     $root = Get-WeChatRoot
+    if (-not (Test-WeChatContactsView $root)) {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
     $list = Find-BestList $root
     if ($list) {
       $lastRoot = $root
@@ -349,16 +425,18 @@ try {
     }
     "scan-contacts" {
       $root = Get-WeChatRoot
-      $navigation = Open-WeChatContacts $root
-      if (-not $navigation) { Write-Result @{ ok = $false; error = "contacts_tab_not_found"; message = "电脑助手未能自动定位微信通讯录入口，已停止读取，不会导入任何联系人" } 2 }
+      $navigationResult = Open-WeChatContacts $root
+      if (-not $navigationResult) { Write-Result @{ ok = $false; error = "contacts_view_not_confirmed"; message = "电脑助手未能确认已进入微信通讯录，已停止读取；不会把消息页内容当作联系人导入" } 2 }
+      $navigation = [string]$navigationResult.method
       $ready = Wait-ForWeChatContactList
       $root = $ready.root
       $list = $ready.list
-      if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "contacts_not_exposed"; message = "电脑助手已打开微信并尝试进入通讯录，但未等到可读取的联系人列表；已停止读取，不会导入任何联系人" } 2 }
+      if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "contacts_not_exposed"; message = "电脑助手已确认进入微信通讯录，但未等到可读取的联系人列表；已停止读取，不会导入任何联系人" } 2 }
       $contacts = New-Object System.Collections.Generic.HashSet[string]
       $stagnant = 0
       $pages = 0
       for ($page = 0; $page -lt 240; $page++) {
+        if (-not (Test-WeChatContactsView $root)) { Write-Result @{ ok = $false; error = "contacts_view_lost"; message = "同步过程中微信不再停留在通讯录页面，已停止读取；不会导入可能来自消息页的数据" } 2 }
         $before = $contacts.Count
         foreach ($name in (Read-VisibleListNames $list)) { $contacts.Add($name) | Out-Null }
         $pages++
