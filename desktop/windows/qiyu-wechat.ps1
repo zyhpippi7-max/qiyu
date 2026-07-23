@@ -25,6 +25,13 @@ public static class QiyuMouse {
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
   }
 }
+public static class QiyuWindow {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
 "@
 
 function Write-Result([hashtable]$Value, [int]$ExitCode = 0) {
@@ -121,8 +128,24 @@ function Start-WeChat {
 
 function Activate-WeChat {
   $process = Start-WeChat
+  $process.Refresh()
+  $handle = [IntPtr]$process.MainWindowHandle
+  if ($handle -eq [IntPtr]::Zero) { throw "微信主窗口不可用，请从托盘恢复微信后重试" }
+  # AppActivate alone can report success while Windows keeps the target behind
+  # the browser.  Restore a minimized window and request foreground focus by
+  # its real top-level handle before sending any mouse or keyboard input.
+  [QiyuWindow]::ShowWindowAsync($handle, 9) | Out-Null
+  [QiyuWindow]::BringWindowToTop($handle) | Out-Null
   [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) | Out-Null
-  Start-Sleep -Milliseconds 700
+  [QiyuWindow]::SetForegroundWindow($handle) | Out-Null
+  [QiyuWindow]::SetFocus($handle) | Out-Null
+  for ($attempt = 0; $attempt -lt 4; $attempt++) {
+    Start-Sleep -Milliseconds 250
+    if ([QiyuWindow]::GetForegroundWindow() -eq $handle) { break }
+    [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) | Out-Null
+    [QiyuWindow]::BringWindowToTop($handle) | Out-Null
+    [QiyuWindow]::SetForegroundWindow($handle) | Out-Null
+  }
   return $process
 }
 
