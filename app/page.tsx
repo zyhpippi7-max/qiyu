@@ -372,7 +372,7 @@ function Dashboard({ user, logout }: { user: AuthUser; logout: () => Promise<voi
               </a>
               <a className="download-secondary" href="/download/QiyuAI-Windows-latest.exe">
                 <Download size={22} />
-                <span><strong>下载 Windows 版</strong><small>Windows 10 / 11 · 0.5.7</small></span>
+                <span><strong>下载 Windows 版</strong><small>Windows 10 / 11 · 0.5.10</small></span>
               </a>
               <button className="download-device-link" onClick={() => navigate("devices")}>
                 已经安装？查看连接状态 <ChevronRight size={16} />

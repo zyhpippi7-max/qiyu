@@ -26,15 +26,16 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.9 desktop assistant", async () => {
-  const [packageText, agentText, helperText] = await Promise.all([
+test("packages the Mac and Windows automation adapters in the 0.5.10 desktop assistant", async () => {
+  const [packageText, agentText, helperText, windowsHelperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
     readFile(new URL("desktop/helpers/WeChatContactScanner.swift", root), "utf8"),
+    readFile(new URL("desktop/windows/qiyu-wechat.ps1", root), "utf8"),
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.9");
+  assert.equal(packageJson.version, "0.5.10");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -43,6 +44,10 @@ test("packages the Mac and Windows automation adapters in the 0.5.9 desktop assi
   assert.match(agentText, /--wechat-draft/);
   assert.match(helperText, /CGPreflightScreenCaptureAccess/);
   assert.match(helperText, /AXIsProcessTrustedWithOptions/);
+  assert.match(windowsHelperText, /left_contacts_icon/);
+  assert.match(windowsHelperText, /Favorites icon must never be probed/);
+  assert.doesNotMatch(windowsHelperText, /SendWait\("\^2"\)/);
+  assert.doesNotMatch(windowsHelperText, /foreach \(\$offset in @\(180, 225, 270\)\)/);
   await access(new URL("desktop/bin/qiyu-wechat-contact-scanner", root));
   await access(new URL("desktop/windows/qiyu-wechat.ps1", root));
 });

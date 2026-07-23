@@ -283,25 +283,16 @@ function Open-WeChatContacts($Root) {
     if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "uia_navigation" } }
   }
   try {
-    # WeChat's desktop navigation uses Ctrl+2 for contacts in builds that do not
-    # expose the icon to UI Automation.  Verification is still mandatory below.
-    Activate-WeChat | Out-Null
-    [System.Windows.Forms.SendKeys]::SendWait("^2")
-    $verifiedRoot = Wait-ForWeChatContactsView
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "keyboard_shortcut" } }
-  } catch {}
-  try {
     $bounds = $Root.Current.BoundingRectangle
     if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
-    # The chat icon and contacts icon move between WeChat versions.  Probe only
-    # the likely contacts slots, and continue only after the contacts page is verified.
-    $x = [int]($bounds.X + [Math]::Max(28, [Math]::Min(52, $bounds.Width * 0.065)))
-    foreach ($offset in @(180, 225, 270)) {
-      $y = [int]($bounds.Y + [Math]::Min($offset, [Math]::Max(150, $bounds.Height * 0.34)))
-      [QiyuMouse]::Click($x, $y)
-      $verifiedRoot = Wait-ForWeChatContactsView
-      if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "left_navigation_fallback" } }
-    }
+    # The people icon is the third item in the left WeChat rail.  The following
+    # Favorites icon must never be probed, because it exposes saved messages.
+    $x = [int]($bounds.X + [Math]::Max(38, [Math]::Min(52, $bounds.Width * 0.05)))
+    $contactOffset = [Math]::Min(205, [Math]::Max(185, $bounds.Height * 0.26))
+    $y = [int]($bounds.Y + $contactOffset)
+    [QiyuMouse]::Click($x, $y)
+    $verifiedRoot = Wait-ForWeChatContactsView
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "left_contacts_icon" } }
   } catch {}
   return $null
 }
