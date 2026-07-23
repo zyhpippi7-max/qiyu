@@ -214,6 +214,44 @@ function Read-VisibleListNames($List) {
   return $output
 }
 
+function Open-WeChatContacts($Root) {
+  $contactsTab = Find-ByName $Root @("通讯录", "联系人", "Contacts", "Address Book")
+  if ($contactsTab -and (Click-Element $contactsTab)) {
+    Start-Sleep -Milliseconds 900
+    return "uia_control"
+  }
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return "" }
+    # Recent Windows WeChat builds sometimes hide the navigation icon from UI Automation.
+    # The second item in WeChat's fixed left navigation rail is the contacts view.
+    $x = [int]($bounds.X + [Math]::Max(28, [Math]::Min(46, $bounds.Width * 0.06)))
+    $y = [int]($bounds.Y + [Math]::Max(135, [Math]::Min(185, $bounds.Height * 0.23)))
+    [QiyuMouse]::Click($x, $y)
+    Start-Sleep -Milliseconds 900
+    return "left_navigation_fallback"
+  } catch {}
+  return ""
+}
+
+function Wait-ForWeChatContactList([int]$Attempts = 12) {
+  $lastRoot = $null
+  $lastList = $null
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    $root = Get-WeChatRoot
+    $list = Find-BestList $root
+    if ($list) {
+      $lastRoot = $root
+      $lastList = $list
+      if (@(Read-VisibleListNames $list).Count -gt 0) {
+        return @{ root = $root; list = $list; ready = $true }
+      }
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  return @{ root = $lastRoot; list = $lastList; ready = $false }
+}
+
 function Scroll-List($List) {
   try {
     $pattern = $List.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
@@ -311,11 +349,12 @@ try {
     }
     "scan-contacts" {
       $root = Get-WeChatRoot
-      $contactsTab = Find-ByName $root @("通讯录", "Contacts")
-      if ($contactsTab) { Click-Element $contactsTab | Out-Null; Start-Sleep -Milliseconds 900 }
-      $root = Get-WeChatRoot
-      $list = Find-BestList $root
-      if (-not $list) { Write-Result @{ ok = $false; error = "contacts_not_exposed"; message = "没有定位到微信通讯录列表，请先在微信中点开通讯录后重试" } 2 }
+      $navigation = Open-WeChatContacts $root
+      if (-not $navigation) { Write-Result @{ ok = $false; error = "contacts_tab_not_found"; message = "电脑助手未能自动定位微信通讯录入口，已停止读取，不会导入任何联系人" } 2 }
+      $ready = Wait-ForWeChatContactList
+      $root = $ready.root
+      $list = $ready.list
+      if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "contacts_not_exposed"; message = "电脑助手已打开微信并尝试进入通讯录，但未等到可读取的联系人列表；已停止读取，不会导入任何联系人" } 2 }
       $contacts = New-Object System.Collections.Generic.HashSet[string]
       $stagnant = 0
       $pages = 0
@@ -329,8 +368,8 @@ try {
         Start-Sleep -Milliseconds 250
       }
       $result = @($contacts) | Sort-Object
-      if ($result.Count -eq 0) { Write-Result @{ ok = $false; error = "no_contacts"; message = "没有读取到联系人，请保持微信通讯录页面可见后重试" } 3 }
-      Write-Result @{ ok = $true; contacts = $result; count = $result.Count; pages = $pages }
+      if ($result.Count -eq 0) { Write-Result @{ ok = $false; error = "no_contacts"; message = "电脑助手已进入微信通讯录，但没有读取到可导入联系人；不会保存空结果" } 3 }
+      Write-Result @{ ok = $true; contacts = $result; count = $result.Count; pages = $pages; navigation = $navigation }
     }
     "scan-inbox" {
       $root = Get-WeChatRoot
