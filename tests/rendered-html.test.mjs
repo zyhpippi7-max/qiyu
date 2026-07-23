@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.10 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.11 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -35,7 +35,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.10 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.10");
+  assert.equal(packageJson.version, "0.5.11");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -44,9 +44,12 @@ test("packages the Mac and Windows automation adapters in the 0.5.10 desktop ass
   assert.match(agentText, /--wechat-draft/);
   assert.match(helperText, /CGPreflightScreenCaptureAccess/);
   assert.match(helperText, /AXIsProcessTrustedWithOptions/);
-  assert.match(windowsHelperText, /left_contacts_icon/);
-  assert.match(windowsHelperText, /Favorites icon must never be probed/);
+  assert.match(windowsHelperText, /Get-WeChatRailCandidates/);
+  assert.match(windowsHelperText, /contacts_after_chats_uia/);
+  assert.match(windowsHelperText, /CONTACTS_VIEW_NOT_CONFIRMED/);
   assert.doesNotMatch(windowsHelperText, /SendWait\("\^2"\)/);
+  assert.doesNotMatch(windowsHelperText, /\$bounds\.Height \* 0\.26/);
+  assert.doesNotMatch(windowsHelperText, /Max\(185/);
   assert.doesNotMatch(windowsHelperText, /foreach \(\$offset in @\(180, 225, 270\)\)/);
   await access(new URL("desktop/bin/qiyu-wechat-contact-scanner", root));
   await access(new URL("desktop/windows/qiyu-wechat.ps1", root));

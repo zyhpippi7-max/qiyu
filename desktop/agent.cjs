@@ -40,7 +40,7 @@ function runMacWechatHelper(args = [], timeout = 30000) {
 
 function run(file, args = [], timeout = 20000) {
   return new Promise((resolve) => {
-    execFile(file, args, { timeout }, (error, stdout, stderr) => resolve({
+    execFile(file, args, { timeout, encoding: "utf8", windowsHide: true }, (error, stdout, stderr) => resolve({
       ok: !error, code: error?.code || 0, output: String(stdout || stderr || error?.message || "").trim(),
     }));
   });
@@ -187,11 +187,20 @@ class QiyuAgent {
       await this.openWechat();
       const result = await this.runWindowsWechat("scan-contacts", [], 300000);
       let data;
-      try { data = JSON.parse(result.output); } catch { throw new Error(result.output || "微信通讯录没有返回有效结果"); }
-      if (!result.ok || !data?.ok) throw new Error(data?.message || data?.error || "未能读取微信通讯录，请保持微信已登录并更新到最新版");
+      try { data = JSON.parse(result.output); } catch { throw new Error("WECHAT_CONTACTS_INVALID_RESPONSE"); }
+      if (!result.ok || !data?.ok) {
+        const knownCodes = new Set([
+          "CONTACTS_VIEW_NOT_CONFIRMED",
+          "CONTACTS_LIST_NOT_READY",
+          "CONTACTS_VIEW_LOST",
+          "NO_CONTACTS_FOUND",
+        ]);
+        const code = String(data?.error || data?.message || "").trim();
+        throw new Error(knownCodes.has(code) ? code : "WECHAT_CONTACTS_SCAN_FAILED");
+      }
       const contacts = Array.isArray(data.contacts) ? data.contacts.map(name => ({ name: String(name || "").trim(), confidence: 1 })).filter(item => item.name) : [];
-      if (!contacts.length) throw new Error("微信没有暴露可读取的通讯录，请打开微信通讯录页面后重试");
-      return { contacts, count: contacts.length, pages: Number(data.pages || 1), notice: "已从当前登录微信读取联系人，等待你在网站确认导入" };
+      if (!contacts.length) throw new Error("NO_CONTACTS_FOUND");
+      return { contacts, count: contacts.length, pages: Number(data.pages || 1), notice: "WECHAT_CONTACTS_READY", navigation: String(data.navigation || "") };
     }
     if (process.platform !== "darwin") throw new Error("当前系统暂不支持微信联系人同步");
     await this.openWechat();
