@@ -25,12 +25,25 @@ public static class QiyuMouse {
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
   }
 }
+ [StructLayout(LayoutKind.Sequential)]
+ public struct QiyuWindowRect {
+  public int Left;
+  public int Top;
+  public int Right;
+  public int Bottom;
+ }
 public static class QiyuWindow {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out QiyuWindowRect rect);
+  public static QiyuWindowRect GetBounds(IntPtr hWnd) {
+    QiyuWindowRect rect = new QiyuWindowRect();
+    GetWindowRect(hWnd, out rect);
+    return rect;
+  }
 }
 "@
 
@@ -163,6 +176,28 @@ function Get-WeChatRoot {
   return $root
 }
 
+function Get-WeChatScreenBounds($Root) {
+  if (-not $Root) { return $null }
+  try {
+    $handle = [IntPtr]$Root.Current.NativeWindowHandle
+    if ($handle -ne [IntPtr]::Zero) {
+      $rect = [QiyuWindow]::GetBounds($handle)
+      $width = $rect.Right - $rect.Left
+      $height = $rect.Bottom - $rect.Top
+      if ($width -ge 400 -and $height -ge 350) {
+        return [pscustomobject]@{ X = $rect.Left; Y = $rect.Top; Width = $width; Height = $height }
+      }
+    }
+  } catch {}
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    if ($bounds.Width -ge 400 -and $bounds.Height -ge 350) {
+      return [pscustomobject]@{ X = [int]$bounds.X; Y = [int]$bounds.Y; Width = [int]$bounds.Width; Height = [int]$bounds.Height }
+    }
+  } catch {}
+  return $null
+}
+
 function Click-Element($Element) {
   if (-not $Element) { return $false }
   try {
@@ -289,16 +324,15 @@ function New-WeChatRailTarget($Candidate, [string]$Proof) {
 function Find-WeChatContactsRailTarget($Root) {
   if (-not $Root) { return $null }
   try {
-    $bounds = $Root.Current.BoundingRectangle
-    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
-    # WeChat's rail is fixed to the top-left of its visible main window.  The
-    # people/Contacts icon is centred 24px from the left and 130px from the
-    # window top in the current Windows client.  Do not infer a target from
-    # arbitrary UIA descendants; those include invisible wrappers.
+    $bounds = Get-WeChatScreenBounds $Root
+    if (-not $bounds) { return $null }
+    # UIA rectangles can be DPI-virtualized while mouse_event uses physical
+    # screen pixels.  GetWindowRect keeps the click in the same coordinate
+    # system as the visible WeChat window.
     return [pscustomobject]@{
       x = [int]($bounds.X + 24)
       y = [int]($bounds.Y + 130)
-      proof = "main_window_contacts_geometry"
+      proof = "physical_main_window_contacts_geometry"
     }
   } catch {}
   return $null
@@ -306,7 +340,7 @@ function Find-WeChatContactsRailTarget($Root) {
 
 function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
   if (-not $Root -or -not $ExpectedRailTarget) { return $false }
-  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats", "main_window_contacts_geometry")) { return $false }
+  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats")) { return $false }
   try {
     $selected = @(Get-WeChatRailCandidates $Root | Where-Object { $_.isSelected })
     foreach ($item in $selected) {
@@ -352,8 +386,8 @@ function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts 
 function Open-WeChatContacts($Root) {
   if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts"; railTarget = $null } }
   try {
-    $bounds = $Root.Current.BoundingRectangle
-    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
+    $bounds = Get-WeChatScreenBounds $Root
+    if (-not $bounds) { return $null }
     $target = Find-WeChatContactsRailTarget $Root
     if ($target) {
       # UIA Invoke can activate a wrapper instead of the visible icon.  Click
@@ -361,11 +395,11 @@ function Open-WeChatContacts($Root) {
       [QiyuMouse]::Click($target.x, $target.y)
       $method = [string]$target.proof
     } else {
-      $x = [int]($bounds.X + [Math]::Min(44, [Math]::Max(24, $bounds.Width * 0.045)))
+      $x = [int]($bounds.X + 24)
       $y = [int]($bounds.Y + 130)
       [QiyuMouse]::Click($x, $y)
       $method = "contacts_fixed_rail_geometry"
-      $target = [pscustomobject]@{ x = $x; y = $y; proof = "fixed_contacts_position" }
+      $target = [pscustomobject]@{ x = $x; y = $y; proof = "physical_main_window_contacts_geometry" }
     }
     $verifiedRoot = Wait-ForWeChatContactsView $target
     if ($verifiedRoot) { return @{ root = $verifiedRoot; method = $method; railTarget = $target } }

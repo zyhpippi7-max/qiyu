@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.14 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.15 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -35,7 +35,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.14 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.14");
+  assert.equal(packageJson.version, "0.5.15");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -45,7 +45,9 @@ test("packages the Mac and Windows automation adapters in the 0.5.14 desktop ass
   assert.match(helperText, /CGPreflightScreenCaptureAccess/);
   assert.match(helperText, /AXIsProcessTrustedWithOptions/);
   assert.match(windowsHelperText, /AutomationElement\]::FromHandle/);
-  assert.match(windowsHelperText, /main_window_contacts_geometry/);
+  assert.match(windowsHelperText, /Get-WeChatScreenBounds/);
+  assert.match(windowsHelperText, /GetWindowRect/);
+  assert.match(windowsHelperText, /physical_main_window_contacts_geometry/);
   assert.match(windowsHelperText, /\$bounds\.X \+ 24/);
   assert.match(windowsHelperText, /\$bounds\.Y \+ 130/);
   assert.match(windowsHelperText, /ShowWindowAsync/);
