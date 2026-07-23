@@ -151,14 +151,14 @@ function Activate-WeChat {
 
 function Get-WeChatRoot {
   $process = Activate-WeChat
-  $condition = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
-    $process.Id
-  )
-  $root = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
-    [System.Windows.Automation.TreeScope]::Children,
-    $condition
-  )
+  $process.Refresh()
+  $handle = [IntPtr]$process.MainWindowHandle
+  # A process can own invisible helper windows.  FromHandle binds automation
+  # and mouse coordinates to the actual visible main window, unlike searching
+  # for the first desktop child with the same process id.
+  $root = if ($handle -ne [IntPtr]::Zero) {
+    [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+  } else { $null }
   if (-not $root) { throw "没有找到微信主窗口，请确认微信已经登录" }
   return $root
 }
@@ -290,49 +290,29 @@ function Find-WeChatContactsRailTarget($Root) {
   if (-not $Root) { return $null }
   try {
     $bounds = $Root.Current.BoundingRectangle
-    $candidates = @(Get-WeChatRailCandidates $Root | Sort-Object centerY)
-    if ($candidates.Count -eq 0) { return $null }
-
-    # Prefer a real accessibility name whenever this WeChat build exposes one.
-    $named = @($candidates | Where-Object { $_.name -in @("通讯录", "联系人", "Contacts") })
-    if ($named.Count -gt 0) { return New-WeChatRailTarget $named[0] "named_contacts" }
-
-    # When the rail exposes selection state, the selected item is the current
-    # Chats page.  Contacts is the next rail item below it.
-    $selected = @($candidates | Where-Object { $_.isSelected } | Sort-Object centerY | Select-Object -First 1)
-    if ($selected.Count -gt 0) {
-      $afterSelected = @($candidates | Where-Object { $_.centerY -gt ($selected[0].centerY + 16) -and $_.centerY -lt ($selected[0].centerY + 84) } | Sort-Object centerY)
-      if ($afterSelected.Count -gt 0) { return New-WeChatRailTarget $afterSelected[0] "next_after_selected_chats" }
+    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
+    # WeChat's rail is fixed to the top-left of its visible main window.  The
+    # people/Contacts icon is centred 24px from the left and 130px from the
+    # window top in the current Windows client.  Do not infer a target from
+    # arbitrary UIA descendants; those include invisible wrappers.
+    return [pscustomobject]@{
+      x = [int]($bounds.X + 24)
+      y = [int]($bounds.Y + 130)
+      proof = "main_window_contacts_geometry"
     }
-
-    # The Contacts icon is the first left-rail item directly below Chats.  This
-    # uses the rail order, not window height, so compact and maximized windows
-    # take the same path and the Favorites icon is never used as a fallback.
-    $chat = @($candidates | Where-Object { $_.name -in @("微信", "聊天", "Chats") }) | Select-Object -First 1
-    if ($chat) {
-      $afterChat = @($candidates | Where-Object { $_.centerY -gt ($chat.centerY + 16) -and $_.centerY -lt ($chat.centerY + 84) } | Sort-Object centerY)
-      if ($afterChat.Count -gt 0) { return New-WeChatRailTarget $afterChat[0] "next_after_named_chats" }
-    }
-
-    # Some builds expose no names at all.  The rail has fixed icon spacing; the
-    # Contacts centre is about 130px below the top of the WeChat window.  Pick
-    # only that position, then require page verification before reading data.
-    $expectedY = $bounds.Y + 130
-    $fallback = $candidates | Sort-Object @{ Expression = { [Math]::Abs($_.centerY - $expectedY) } }, centerY | Select-Object -First 1
-    return New-WeChatRailTarget $fallback "fixed_contacts_position"
   } catch {}
   return $null
 }
 
 function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
   if (-not $Root -or -not $ExpectedRailTarget) { return $false }
-  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats")) { return $false }
+  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats", "main_window_contacts_geometry")) { return $false }
   try {
     $selected = @(Get-WeChatRailCandidates $Root | Where-Object { $_.isSelected })
     foreach ($item in $selected) {
       if ($item.name -in @("通讯录", "联系人", "Contacts")) { return $true }
       $distance = [Math]::Abs($item.centerX - $ExpectedRailTarget.x) + [Math]::Abs($item.centerY - $ExpectedRailTarget.y)
-      if ($distance -le 18) { return $true }
+      if ($distance -le 22) { return $true }
     }
   } catch {}
   return $false
