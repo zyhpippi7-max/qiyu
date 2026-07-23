@@ -216,39 +216,6 @@ function Read-VisibleListNames($List) {
   return $output
 }
 
-function Test-WeChatContactsView($Root) {
-  if (-not $Root) { return $false }
-  # Do not treat a generic list or navigation icon as proof.  These markers only
-  # belong to the contacts content page and prevent chat or Favorites data reads.
-  $markers = @("新的朋友", "群聊", "标签", "公众号", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
-  try {
-    $bounds = $Root.Current.BoundingRectangle
-    $found = New-Object System.Collections.Generic.HashSet[string]
-    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-    foreach ($element in $elements) {
-      try {
-        $name = ([string]$element.Current.Name).Trim()
-        $rect = $element.Current.BoundingRectangle
-        $centerX = $rect.X + $rect.Width / 2
-        # Contacts markers live in the left content pane.  Ignoring the right
-        # conversation pane prevents a chat title from being used as evidence.
-        if ($markers -contains $name -and $centerX -ge ($bounds.X + 50) -and $centerX -le ($bounds.X + $bounds.Width * 0.55)) { $found.Add($name) | Out-Null }
-      } catch {}
-    }
-    if ($found.Count -ge 2) { return $true }
-  } catch {}
-  return $false
-}
-
-function Wait-ForWeChatContactsView([int]$Attempts = 8) {
-  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-    $root = Get-WeChatRoot
-    if (Test-WeChatContactsView $root) { return $root }
-    Start-Sleep -Milliseconds 350
-  }
-  return $null
-}
-
 function Get-WeChatRailCandidates($Root) {
   $candidates = New-Object System.Collections.Generic.List[object]
   if (-not $Root) { return $candidates }
@@ -287,6 +254,15 @@ function Get-WeChatRailCandidates($Root) {
   return $candidates
 }
 
+function New-WeChatRailTarget($Candidate, [string]$Proof) {
+  if (-not $Candidate) { return $null }
+  return [pscustomobject]@{
+    x = [int]$Candidate.centerX
+    y = [int]$Candidate.centerY
+    proof = $Proof
+  }
+}
+
 function Find-WeChatContactsRailTarget($Root) {
   if (-not $Root) { return $null }
   try {
@@ -296,14 +272,14 @@ function Find-WeChatContactsRailTarget($Root) {
 
     # Prefer a real accessibility name whenever this WeChat build exposes one.
     $named = @($candidates | Where-Object { $_.name -in @("通讯录", "联系人", "Contacts") })
-    if ($named.Count -gt 0) { return $named[0].element }
+    if ($named.Count -gt 0) { return New-WeChatRailTarget $named[0] "named_contacts" }
 
     # When the rail exposes selection state, the selected item is the current
     # Chats page.  Contacts is the next rail item below it.
     $selected = @($candidates | Where-Object { $_.isSelected } | Sort-Object centerY | Select-Object -First 1)
     if ($selected.Count -gt 0) {
       $afterSelected = @($candidates | Where-Object { $_.centerY -gt ($selected[0].centerY + 16) -and $_.centerY -lt ($selected[0].centerY + 84) } | Sort-Object centerY)
-      if ($afterSelected.Count -gt 0) { return $afterSelected[0].element }
+      if ($afterSelected.Count -gt 0) { return New-WeChatRailTarget $afterSelected[0] "next_after_selected_chats" }
     }
 
     # The Contacts icon is the first left-rail item directly below Chats.  This
@@ -312,45 +288,94 @@ function Find-WeChatContactsRailTarget($Root) {
     $chat = @($candidates | Where-Object { $_.name -in @("微信", "聊天", "Chats") }) | Select-Object -First 1
     if ($chat) {
       $afterChat = @($candidates | Where-Object { $_.centerY -gt ($chat.centerY + 16) -and $_.centerY -lt ($chat.centerY + 84) } | Sort-Object centerY)
-      if ($afterChat.Count -gt 0) { return $afterChat[0].element }
+      if ($afterChat.Count -gt 0) { return New-WeChatRailTarget $afterChat[0] "next_after_named_chats" }
     }
 
     # Some builds expose no names at all.  The rail has fixed icon spacing; the
     # Contacts centre is about 130px below the top of the WeChat window.  Pick
     # only that position, then require page verification before reading data.
     $expectedY = $bounds.Y + 130
-    return ($candidates | Sort-Object @{ Expression = { [Math]::Abs($_.centerY - $expectedY) } }, centerY | Select-Object -First 1).element
+    $fallback = $candidates | Sort-Object @{ Expression = { [Math]::Abs($_.centerY - $expectedY) } }, centerY | Select-Object -First 1
+    return New-WeChatRailTarget $fallback "fixed_contacts_position"
   } catch {}
   return $null
 }
 
+function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
+  if (-not $Root -or -not $ExpectedRailTarget) { return $false }
+  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats")) { return $false }
+  try {
+    $selected = @(Get-WeChatRailCandidates $Root | Where-Object { $_.isSelected })
+    foreach ($item in $selected) {
+      if ($item.name -in @("通讯录", "联系人", "Contacts")) { return $true }
+      $distance = [Math]::Abs($item.centerX - $ExpectedRailTarget.x) + [Math]::Abs($item.centerY - $ExpectedRailTarget.y)
+      if ($distance -le 18) { return $true }
+    }
+  } catch {}
+  return $false
+}
+
+function Test-WeChatContactsView($Root, $ExpectedRailTarget = $null) {
+  if (-not $Root) { return $false }
+  # Page markers are the strongest proof.  The selected left-rail item is an
+  # accepted second proof only when it was derived as the item after Chats.
+  $markers = @("新的朋友", "群聊", "标签", "公众号", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    $found = New-Object System.Collections.Generic.HashSet[string]
+    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        $name = ([string]$element.Current.Name).Trim()
+        $rect = $element.Current.BoundingRectangle
+        $centerX = $rect.X + $rect.Width / 2
+        if ($markers -contains $name -and $centerX -ge ($bounds.X + 50) -and $centerX -le ($bounds.X + $bounds.Width * 0.55)) { $found.Add($name) | Out-Null }
+      } catch {}
+    }
+    if ($found.Count -ge 2) { return $true }
+  } catch {}
+  return Test-WeChatContactsRailSelection $Root $ExpectedRailTarget
+}
+
+function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts = 10) {
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    $root = Get-WeChatRoot
+    if (Test-WeChatContactsView $root $ExpectedRailTarget) { return $root }
+    Start-Sleep -Milliseconds 350
+  }
+  return $null
+}
+
 function Open-WeChatContacts($Root) {
-  if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts" } }
+  if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts"; railTarget = $null } }
   try {
     $bounds = $Root.Current.BoundingRectangle
     if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $null }
     $target = Find-WeChatContactsRailTarget $Root
     if ($target) {
-      Click-Element $target | Out-Null
-      $method = "contacts_after_chats_uia"
+      # UIA Invoke can activate a wrapper instead of the visible icon.  Click
+      # the visible icon centre directly; this is the same user action.
+      [QiyuMouse]::Click($target.x, $target.y)
+      $method = [string]$target.proof
     } else {
       $x = [int]($bounds.X + [Math]::Min(44, [Math]::Max(24, $bounds.Width * 0.045)))
       $y = [int]($bounds.Y + 130)
       [QiyuMouse]::Click($x, $y)
       $method = "contacts_fixed_rail_geometry"
+      $target = [pscustomobject]@{ x = $x; y = $y; proof = "fixed_contacts_position" }
     }
-    $verifiedRoot = Wait-ForWeChatContactsView
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = $method } }
+    $verifiedRoot = Wait-ForWeChatContactsView $target
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = $method; railTarget = $target } }
   } catch {}
   return $null
 }
 
-function Wait-ForWeChatContactList([int]$Attempts = 12) {
+function Wait-ForWeChatContactList($ExpectedRailTarget = $null, [int]$Attempts = 12) {
   $lastRoot = $null
   $lastList = $null
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     $root = Get-WeChatRoot
-    if (-not (Test-WeChatContactsView $root)) {
+    if (-not (Test-WeChatContactsView $root $ExpectedRailTarget)) {
       Start-Sleep -Milliseconds 500
       continue
     }
@@ -467,7 +492,8 @@ try {
       $navigationResult = Open-WeChatContacts $root
       if (-not $navigationResult) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_NOT_CONFIRMED"; message = "CONTACTS_VIEW_NOT_CONFIRMED" } 2 }
       $navigation = [string]$navigationResult.method
-      $ready = Wait-ForWeChatContactList
+      $railTarget = $navigationResult.railTarget
+      $ready = Wait-ForWeChatContactList $railTarget
       $root = $ready.root
       $list = $ready.list
       if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "CONTACTS_LIST_NOT_READY"; message = "CONTACTS_LIST_NOT_READY" } 2 }
@@ -475,7 +501,7 @@ try {
       $stagnant = 0
       $pages = 0
       for ($page = 0; $page -lt 240; $page++) {
-        if (-not (Test-WeChatContactsView $root)) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_LOST"; message = "CONTACTS_VIEW_LOST" } 2 }
+        if (-not (Test-WeChatContactsView $root $railTarget)) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_LOST"; message = "CONTACTS_VIEW_LOST" } 2 }
         $before = $contacts.Count
         foreach ($name in (Read-VisibleListNames $list)) { $contacts.Add($name) | Out-Null }
         $pages++
