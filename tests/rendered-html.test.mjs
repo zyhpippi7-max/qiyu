@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.20 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.21 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText, releaseScriptText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -36,7 +36,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.20 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.20");
+  assert.equal(packageJson.version, "0.5.21");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -49,12 +49,14 @@ test("packages the Mac and Windows automation adapters in the 0.5.20 desktop ass
   assert.match(windowsHelperText, /Get-WeChatScreenBounds/);
   assert.match(windowsHelperText, /GetWindowRect/);
   assert.match(windowsHelperText, /SetProcessDPIAware/);
-  assert.match(windowsHelperText, /Get-WeChatContactsRailPoint/);
+  assert.match(windowsHelperText, /Find-WeChatContactsRailButton/);
+  assert.match(windowsHelperText, /Find-WeChatChatsRailButton/);
+  assert.match(windowsHelperText, /Get-WeChatRailButtonGreenScore/);
   assert.match(windowsHelperText, /Test-WeChatContactsActive/);
   assert.match(windowsHelperText, /Find-WeChatContactsList/);
   assert.match(windowsHelperText, /Read-WeChatVisibleContacts/);
   assert.match(windowsHelperText, /Scroll-WeChatContactsList/);
-  assert.match(windowsHelperText, /ClickScreen/);
+  assert.match(windowsHelperText, /QiyuMouse\]::Click\(\$centerX, \$centerY\)/);
   assert.match(windowsHelperText, /forced_contacts_rail_click/);
   assert.match(windowsHelperText, /ShowWindowAsync/);
   assert.match(windowsHelperText, /SetForegroundWindow/);
@@ -68,6 +70,8 @@ test("packages the Mac and Windows automation adapters in the 0.5.20 desktop ass
   assert.doesNotMatch(windowsHelperText, /Wait-ForWeChatContactsView/);
   assert.doesNotMatch(windowsHelperText, /Scroll-List\(/);
   assert.doesNotMatch(windowsHelperText, /already_contacts/);
+  assert.doesNotMatch(windowsHelperText, /Get-WeChatContactsRailPoint/);
+  assert.doesNotMatch(windowsHelperText, /Get-WeChatRailAccentScore/);
   assert.doesNotMatch(windowsHelperText, /\[QiyuMouse\]::Click\(\$target\.x, \$target\.y\)/);
   assert.doesNotMatch(windowsHelperText, /\$bounds\.Height \* 0\.26/);
   assert.doesNotMatch(windowsHelperText, /Max\(185/);

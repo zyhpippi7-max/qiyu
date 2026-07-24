@@ -344,29 +344,54 @@ function Read-VisibleListNames($List) {
   return $output
 }
 
-function Get-WeChatContactsRailPoint($Root) {
-  $bounds = Get-WeChatScreenBounds $Root
-  if (-not $bounds) { return $null }
-  return [pscustomobject]@{
-    x = [int]$bounds.X + 24
-    y = [int]$bounds.Y + 130
-    bounds = $bounds
-  }
+function Find-WeChatContactsRailButton($Root) {
+  if (-not $Root) { return $null }
+  try {
+    $rootBounds = $Root.Current.BoundingRectangle
+    foreach ($name in @("通讯录", "联系人", "Contacts")) {
+      $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $name)
+      $button = $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+      if (-not $button) { continue }
+      $rect = $button.Current.BoundingRectangle
+      $centerX = $rect.X + ($rect.Width / 2)
+      $centerY = $rect.Y + ($rect.Height / 2)
+      if ($button.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $rect.Width -ge 24 -and $rect.Height -ge 20 -and $centerX -le ($rootBounds.X + 90) -and $centerY -ge ($rootBounds.Y + 50) -and $centerY -le ($rootBounds.Y + 320)) { return $button }
+    }
+  } catch {}
+  return $null
 }
 
-function Get-WeChatRailAccentScore($Bounds, [int]$CenterOffset) {
+function Find-WeChatChatsRailButton($Root) {
+  if (-not $Root) { return $null }
+  try {
+    $rootBounds = $Root.Current.BoundingRectangle
+    foreach ($name in @("微信", "聊天", "Chats")) {
+      $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $name)
+      $button = $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+      if (-not $button) { continue }
+      $rect = $button.Current.BoundingRectangle
+      $centerX = $rect.X + ($rect.Width / 2)
+      $centerY = $rect.Y + ($rect.Height / 2)
+      if ($button.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $rect.Width -ge 24 -and $rect.Height -ge 20 -and $centerX -le ($rootBounds.X + 90) -and $centerY -ge ($rootBounds.Y + 50) -and $centerY -le ($rootBounds.Y + 320)) { return $button }
+    }
+  } catch {}
+  return $null
+}
+
+function Get-WeChatRailButtonGreenScore($Button) {
   $bitmap = $null
   $graphics = $null
+  if (-not $Button) { return 0 }
   try {
-    $size = 38
-    $originX = [int]$Bounds.X + 5
-    $originY = [int]$Bounds.Y + $CenterOffset - [int]($size / 2)
-    $bitmap = New-Object System.Drawing.Bitmap($size, $size)
+    $rect = $Button.Current.BoundingRectangle
+    $width = [Math]::Max(1, [int]$rect.Width)
+    $height = [Math]::Max(1, [int]$rect.Height)
+    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($originX, $originY, 0, 0, $bitmap.Size)
+    $graphics.CopyFromScreen([int]$rect.X, [int]$rect.Y, 0, 0, $bitmap.Size)
     $score = 0
-    for ($x = 0; $x -lt $size; $x += 2) {
-      for ($y = 0; $y -lt $size; $y += 2) {
+    for ($x = 0; $x -lt $width; $x += 2) {
+      for ($y = 0; $y -lt $height; $y += 2) {
         $pixel = $bitmap.GetPixel($x, $y)
         if ($pixel.G -ge 95 -and $pixel.G -ge ($pixel.R + 24) -and $pixel.G -ge ($pixel.B + 12)) { $score++ }
       }
@@ -383,12 +408,11 @@ function Get-WeChatRailAccentScore($Bounds, [int]$CenterOffset) {
 function Test-WeChatContactsActive($Root) {
   if (-not $Root) { return $false }
   try {
-    $point = Get-WeChatContactsRailPoint $Root
-    if ($point) {
-      $chatScore = Get-WeChatRailAccentScore $point.bounds 90
-      $contactsScore = Get-WeChatRailAccentScore $point.bounds 130
-      if ($contactsScore -ge 14 -and $contactsScore -gt ($chatScore + 6)) { return $true }
-    }
+    $contactsButton = Find-WeChatContactsRailButton $Root
+    $chatsButton = Find-WeChatChatsRailButton $Root
+    $contactsScore = Get-WeChatRailButtonGreenScore $contactsButton
+    $chatsScore = Get-WeChatRailButtonGreenScore $chatsButton
+    return $contactsScore -ge 12 -and $contactsScore -gt ($chatsScore + 4)
   } catch {}
   return $false
 }
@@ -409,13 +433,15 @@ function Open-WeChatContacts($Root) {
     if ($handle -eq [IntPtr]::Zero -or [QiyuWindow]::GetForegroundWindow() -ne $handle) { return $null }
     Start-Sleep -Milliseconds 180
     $root = Get-WeChatRoot -NoActivate
-    $point = Get-WeChatContactsRailPoint $root
-    if (-not $point) { return $null }
-    # Always click the second left-rail icon (通讯录) before scanning.  The old
-    # "already contacts" shortcut could misclassify a chat list and then crawl it.
-    # The point comes from the live WeChat window rectangle, so moving the window
-    # does not alter the target.
-    if (-not [QiyuKeyboard]::ClickScreen($point.x, $point.y)) { return $null }
+    $contactsButton = Find-WeChatContactsRailButton $root
+    if (-not $contactsButton) { return $null }
+    $rect = $contactsButton.Current.BoundingRectangle
+    $centerX = [int]($rect.X + ($rect.Width / 2))
+    $centerY = [int]($rect.Y + ($rect.Height / 2))
+    # Click the named Windows automation control's actual center.  WeChat's
+    # InvokePattern reports success without switching pages, so a real mouse
+    # click is required; no fixed coordinate is used.
+    [QiyuMouse]::Click($centerX, $centerY)
     Start-Sleep -Milliseconds 650
     $verifiedRoot = Wait-ForWeChatContactsActive 14
     if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "forced_contacts_rail_click" } }
