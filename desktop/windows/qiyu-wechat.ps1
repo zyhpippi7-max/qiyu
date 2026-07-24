@@ -389,19 +389,6 @@ function Test-WeChatContactsActive($Root) {
       $contactsScore = Get-WeChatRailAccentScore $point.bounds 130
       if ($contactsScore -ge 14 -and $contactsScore -gt ($chatScore + 6)) { return $true }
     }
-    $markers = @("新的朋友", "群聊", "标签", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
-    $found = New-Object System.Collections.Generic.HashSet[string]
-    $bounds = $Root.Current.BoundingRectangle
-    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-    foreach ($element in $elements) {
-      try {
-        $name = ([string]$element.Current.Name).Trim()
-        $rect = $element.Current.BoundingRectangle
-        $centerX = $rect.X + $rect.Width / 2
-        if ($markers -contains $name -and $centerX -ge ($bounds.X + 45) -and $centerX -le ($bounds.X + $bounds.Width * 0.58)) { $found.Add($name) | Out-Null }
-      } catch {}
-    }
-    return $found.Count -ge 2
   } catch {}
   return $false
 }
@@ -416,21 +403,22 @@ function Wait-ForWeChatContactsActive([int]$Attempts = 14) {
 }
 
 function Open-WeChatContacts($Root) {
-  if (Test-WeChatContactsActive $Root) { return @{ root = $Root; method = "already_contacts" } }
   try {
     $process = Activate-WeChat
     $handle = [IntPtr]$process.MainWindowHandle
     if ($handle -eq [IntPtr]::Zero -or [QiyuWindow]::GetForegroundWindow() -ne $handle) { return $null }
+    Start-Sleep -Milliseconds 180
     $root = Get-WeChatRoot -NoActivate
     $point = Get-WeChatContactsRailPoint $root
     if (-not $point) { return $null }
-    # This is the second rail icon (通讯录), calculated from the live window
-    # rectangle and the window DPI.  No keyboard shortcut or chat target exists
-    # anywhere in this contact-sync path.
+    # Always click the second left-rail icon (通讯录) before scanning.  The old
+    # "already contacts" shortcut could misclassify a chat list and then crawl it.
+    # The point comes from the live WeChat window rectangle, so moving the window
+    # does not alter the target.
     if (-not [QiyuKeyboard]::ClickScreen($point.x, $point.y)) { return $null }
     Start-Sleep -Milliseconds 650
     $verifiedRoot = Wait-ForWeChatContactsActive 14
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "contacts_rail_click" } }
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "forced_contacts_rail_click" } }
   } catch {}
   return $null
 }
