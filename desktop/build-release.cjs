@@ -11,11 +11,13 @@ if (!new Set(["mac", "win"]).has(target)) {
 const root = path.resolve(__dirname, "..");
 const output = path.join(root, "desktop-dist");
 const temporaryOutput = fs.mkdtempSync(path.join(os.tmpdir(), `qiyu-ai-${target}-`));
-const builder = path.join(
+const builderCli = path.join(
   root,
   "node_modules",
-  ".bin",
-  process.platform === "win32" ? "electron-builder.cmd" : "electron-builder",
+  "electron-builder",
+  "out",
+  "cli",
+  "cli.js",
 );
 
 const args = target === "mac"
@@ -23,13 +25,17 @@ const args = target === "mac"
   : ["--win", "nsis", "zip", "--x64", "--publish", "never"];
 
 try {
-  execFileSync(builder, [
+  // Invoke the JavaScript CLI through Node instead of the Windows .cmd shim.
+  // execFileSync keeps each path as a separate argument, so a repository path
+  // containing spaces or Chinese characters cannot be split by cmd.exe.
+  execFileSync(process.execPath, [
+    builderCli,
     ...args,
     `--config.directories.output=${temporaryOutput}`,
   ], {
     cwd: root,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: false,
   });
 
   if (target === "mac") {

@@ -34,6 +34,7 @@ public static class QiyuMouse {
  [StructLayout(LayoutKind.Explicit)]
  public struct QiyuKeyboardInputUnion {
   [FieldOffset(0)] public QiyuKeybdInput keyboard;
+  [FieldOffset(0)] public QiyuMouseInput mouse;
  }
  [StructLayout(LayoutKind.Sequential)]
  public struct QiyuKeybdInput {
@@ -43,12 +44,27 @@ public static class QiyuMouse {
   public uint time;
   public UIntPtr extraInfo;
  }
+ [StructLayout(LayoutKind.Sequential)]
+ public struct QiyuMouseInput {
+  public int dx;
+  public int dy;
+  public uint mouseData;
+  public uint flags;
+  public uint time;
+  public UIntPtr extraInfo;
+ }
  public static class QiyuKeyboard {
   const uint INPUT_KEYBOARD = 1;
+  const uint INPUT_MOUSE = 0;
   const uint KEYEVENTF_KEYUP = 0x0002;
-  const ushort VK_CONTROL = 0x11;
-  const ushort VK_2 = 0x32;
+  const uint MOUSEEVENTF_MOVE = 0x0001;
+  const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+  const uint MOUSEEVENTF_LEFTUP = 0x0004;
+  const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+  const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+  const ushort VK_NEXT = 0x22;
   [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint count, QiyuKeyboardInput[] inputs, int size);
+  [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
   static QiyuKeyboardInput Key(ushort key, bool keyUp) {
     QiyuKeyboardInput input = new QiyuKeyboardInput();
     input.type = INPUT_KEYBOARD;
@@ -56,8 +72,22 @@ public static class QiyuMouse {
     input.data.keyboard.flags = keyUp ? KEYEVENTF_KEYUP : 0;
     return input;
   }
-  public static bool SendCtrl2() {
-    QiyuKeyboardInput[] inputs = new QiyuKeyboardInput[] { Key(VK_CONTROL, false), Key(VK_2, false), Key(VK_2, true), Key(VK_CONTROL, true) };
+  public static bool SendPageDown() {
+    QiyuKeyboardInput[] inputs = new QiyuKeyboardInput[] { Key(VK_NEXT, false), Key(VK_NEXT, true) };
+    return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(QiyuKeyboardInput))) == inputs.Length;
+  }
+  static QiyuKeyboardInput Mouse(int x, int y, uint flags) {
+    int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
+    QiyuKeyboardInput input = new QiyuKeyboardInput();
+    input.type = INPUT_MOUSE;
+    input.data.mouse.dx = (int)Math.Round((x - left) * 65535.0 / Math.Max(1, width - 1));
+    input.data.mouse.dy = (int)Math.Round((y - top) * 65535.0 / Math.Max(1, height - 1));
+    input.data.mouse.flags = flags;
+    return input;
+  }
+  public static bool ClickScreen(int x, int y) {
+    uint move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    QiyuKeyboardInput[] inputs = new QiyuKeyboardInput[] { Mouse(x, y, move), Mouse(x, y, move | MOUSEEVENTF_LEFTDOWN), Mouse(x, y, move | MOUSEEVENTF_LEFTUP) };
     return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(QiyuKeyboardInput))) == inputs.Length;
   }
  }
@@ -314,72 +344,29 @@ function Read-VisibleListNames($List) {
   return $output
 }
 
-function Get-WeChatRailCandidates($Root) {
-  $candidates = New-Object System.Collections.Generic.List[object]
-  if (-not $Root) { return $candidates }
-  try {
-    $bounds = $Root.Current.BoundingRectangle
-    if ($bounds.Width -lt 400 -or $bounds.Height -lt 350) { return $candidates }
-    $railRight = $bounds.X + [Math]::Min(92, [Math]::Max(52, $bounds.Width * 0.11))
-    $seen = New-Object System.Collections.Generic.HashSet[string]
-    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-    foreach ($element in $elements) {
-      try {
-        $type = $element.Current.ControlType
-        if ($type -ne [System.Windows.Automation.ControlType]::Button -and $type -ne [System.Windows.Automation.ControlType]::ListItem -and $type -ne [System.Windows.Automation.ControlType]::Custom) { continue }
-        $rect = $element.Current.BoundingRectangle
-        $centerX = $rect.X + $rect.Width / 2
-        $centerY = $rect.Y + $rect.Height / 2
-        if ($rect.Width -lt 14 -or $rect.Height -lt 14 -or $rect.Width -gt 80 -or $rect.Height -gt 80) { continue }
-        if ($centerX -gt $railRight -or $centerY -lt ($bounds.Y + 58) -or $centerY -gt ($bounds.Y + 310)) { continue }
-        $key = "{0}:{1}:{2}:{3}" -f [int]$rect.X, [int]$rect.Y, [int]$rect.Width, [int]$rect.Height
-        if (-not $seen.Add($key)) { continue }
-        $isSelected = $false
-        try {
-          $selection = $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-          $isSelected = [bool]$selection.Current.IsSelected
-        } catch {}
-        $candidates.Add([pscustomobject]@{
-          element = $element
-          name = ([string]$element.Current.Name).Trim()
-          centerX = $centerX
-          centerY = $centerY
-          isSelected = $isSelected
-        })
-      } catch {}
-    }
-  } catch {}
-  return $candidates
+function Get-WeChatContactsRailPoint($Root) {
+  $bounds = Get-WeChatScreenBounds $Root
+  if (-not $bounds) { return $null }
+  return [pscustomobject]@{
+    x = [int]$bounds.X + 24
+    y = [int]$bounds.Y + 130
+    bounds = $bounds
+  }
 }
 
-function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
-  if (-not $Root -or -not $ExpectedRailTarget) { return $false }
-  if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats")) { return $false }
-  try {
-    $selected = @(Get-WeChatRailCandidates $Root | Where-Object { $_.isSelected })
-    foreach ($item in $selected) {
-      if ($item.name -in @("通讯录", "联系人", "Contacts")) { return $true }
-      $distance = [Math]::Abs($item.centerX - $ExpectedRailTarget.x) + [Math]::Abs($item.centerY - $ExpectedRailTarget.y)
-      if ($distance -le 22) { return $true }
-    }
-  } catch {}
-  return $false
-}
-
-function Get-WeChatRailGreenScore($Bounds, [int]$CenterOffset) {
+function Get-WeChatRailAccentScore($Bounds, [int]$CenterOffset) {
   $bitmap = $null
   $graphics = $null
   try {
-    $width = 38
-    $height = 38
+    $size = 38
     $originX = [int]$Bounds.X + 5
-    $originY = [int]$Bounds.Y + $CenterOffset - [int]($height / 2)
-    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+    $originY = [int]$Bounds.Y + $CenterOffset - [int]($size / 2)
+    $bitmap = New-Object System.Drawing.Bitmap($size, $size)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.CopyFromScreen($originX, $originY, 0, 0, $bitmap.Size)
     $score = 0
-    for ($x = 0; $x -lt $width; $x += 2) {
-      for ($y = 0; $y -lt $height; $y += 2) {
+    for ($x = 0; $x -lt $size; $x += 2) {
+      for ($y = 0; $y -lt $size; $y += 2) {
         $pixel = $bitmap.GetPixel($x, $y)
         if ($pixel.G -ge 95 -and $pixel.G -ge ($pixel.R + 24) -and $pixel.G -ge ($pixel.B + 12)) { $score++ }
       }
@@ -393,97 +380,115 @@ function Get-WeChatRailGreenScore($Bounds, [int]$CenterOffset) {
   return 0
 }
 
-function Test-WeChatContactsRailVisual($Root) {
+function Test-WeChatContactsActive($Root) {
   if (-not $Root) { return $false }
   try {
-    $bounds = Get-WeChatScreenBounds $Root
-    if (-not $bounds -or $bounds.Width -lt 300 -or $bounds.Height -lt 260) { return $false }
-    # WeChat paints the active rail item green.  This confirms the shortcut
-    # result without clicking either rail icon, even when UIA omits labels.
-    $chatScore = Get-WeChatRailGreenScore $bounds 90
-    $contactsScore = Get-WeChatRailGreenScore $bounds 130
-    return $contactsScore -ge 18 -and $contactsScore -gt ($chatScore + 8)
-  } catch {}
-  return $false
-}
-
-function Test-WeChatContactsView($Root, $ExpectedRailTarget = $null) {
-  if (-not $Root) { return $false }
-  # Page markers are the strongest proof.  The selected left-rail item is an
-  # accepted second proof only when it was derived as the item after Chats.
-  $markers = @("新的朋友", "群聊", "标签", "公众号", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
-  try {
-    $bounds = $Root.Current.BoundingRectangle
+    $point = Get-WeChatContactsRailPoint $Root
+    if ($point) {
+      $chatScore = Get-WeChatRailAccentScore $point.bounds 90
+      $contactsScore = Get-WeChatRailAccentScore $point.bounds 130
+      if ($contactsScore -ge 14 -and $contactsScore -gt ($chatScore + 6)) { return $true }
+    }
+    $markers = @("新的朋友", "群聊", "标签", "企业微信联系人", "New Friends", "Group Chats", "Tags", "Official Accounts")
     $found = New-Object System.Collections.Generic.HashSet[string]
+    $bounds = $Root.Current.BoundingRectangle
     $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
     foreach ($element in $elements) {
       try {
         $name = ([string]$element.Current.Name).Trim()
         $rect = $element.Current.BoundingRectangle
         $centerX = $rect.X + $rect.Width / 2
-        if ($markers -contains $name -and $centerX -ge ($bounds.X + 50) -and $centerX -le ($bounds.X + $bounds.Width * 0.55)) { $found.Add($name) | Out-Null }
+        if ($markers -contains $name -and $centerX -ge ($bounds.X + 45) -and $centerX -le ($bounds.X + $bounds.Width * 0.58)) { $found.Add($name) | Out-Null }
       } catch {}
     }
-    if ($found.Count -ge 2) { return $true }
+    return $found.Count -ge 2
   } catch {}
-  if (Test-WeChatContactsRailSelection $Root $ExpectedRailTarget) { return $true }
-  return Test-WeChatContactsRailVisual $Root
+  return $false
 }
 
-function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts = 10, [switch]$NoActivate) {
+function Wait-ForWeChatContactsActive([int]$Attempts = 14) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-    $root = Get-WeChatRoot -NoActivate:$NoActivate
-    if (Test-WeChatContactsView $root $ExpectedRailTarget) { return $root }
+    $root = Get-WeChatRoot -NoActivate
+    if (Test-WeChatContactsActive $root) { return $root }
     Start-Sleep -Milliseconds 350
   }
   return $null
 }
 
 function Open-WeChatContacts($Root) {
-  if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts"; railTarget = $null } }
+  if (Test-WeChatContactsActive $Root) { return @{ root = $Root; method = "already_contacts" } }
   try {
-    # Ctrl+2 is verified on this WeChat build.  SendInput emits real key-down
-    # and key-up events to the foreground WeChat window; SendKeys can be lost
-    # when the desktop assistant owns the active input queue.
     $process = Activate-WeChat
     $handle = [IntPtr]$process.MainWindowHandle
     if ($handle -eq [IntPtr]::Zero -or [QiyuWindow]::GetForegroundWindow() -ne $handle) { return $null }
-    try { $Root.SetFocus() } catch {}
-    Start-Sleep -Milliseconds 120
-    if (-not [QiyuKeyboard]::SendCtrl2()) { return $null }
+    $root = Get-WeChatRoot -NoActivate
+    $point = Get-WeChatContactsRailPoint $root
+    if (-not $point) { return $null }
+    # This is the second rail icon (通讯录), calculated from the live window
+    # rectangle and the window DPI.  No keyboard shortcut or chat target exists
+    # anywhere in this contact-sync path.
+    if (-not [QiyuKeyboard]::ClickScreen($point.x, $point.y)) { return $null }
     Start-Sleep -Milliseconds 650
-    # Do not call Activate-WeChat again while the shortcut result is settling:
-    # reactivating the main window can steal focus from WeChat's rail control.
-    $verifiedRoot = Wait-ForWeChatContactsView $null 8 -NoActivate
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "sendinput_contacts_shortcut"; railTarget = $null } }
-
+    $verifiedRoot = Wait-ForWeChatContactsActive 14
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "contacts_rail_click" } }
   } catch {}
   return $null
 }
 
-function Wait-ForWeChatContactList($ExpectedRailTarget = $null, [int]$Attempts = 12, [switch]$NoActivate) {
-  $lastRoot = $null
-  $lastList = $null
-  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-    $root = Get-WeChatRoot -NoActivate:$NoActivate
-    if (-not (Test-WeChatContactsView $root $ExpectedRailTarget)) {
-      Start-Sleep -Milliseconds 500
-      continue
-    }
-    $list = Find-BestList $root
-    if ($list) {
-      $lastRoot = $root
-      $lastList = $list
-      if (@(Read-VisibleListNames $list).Count -gt 0) {
-        return @{ root = $root; list = $list; ready = $true }
-      }
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  return @{ root = $lastRoot; list = $lastList; ready = $false }
+function Is-WeChatImportedContactName([string]$Name) {
+  $value = ($Name -replace "\s+", " ").Trim()
+  if ($value.Length -lt 1 -or $value.Length -gt 80) { return $false }
+  if ($value -match "^(微信|通讯录|联系人|聊天|搜索|新的朋友|群聊|标签|公众号|企业微信联系人|仅聊天的朋友|Contacts|Chats|New Friends|Group Chats|Tags|Official Accounts)$") { return $false }
+  if ($value -match "^(\d{1,2}:\d{2}|\d+|\d+位联系人|星期.|周.|昨天|前天)$") { return $false }
+  if ($value -match "^[\p{P}\p{S}\s]+$") { return $false }
+  return $true
 }
 
-function Scroll-List($List) {
+function Read-WeChatVisibleContacts($List) {
+  $output = New-Object System.Collections.Generic.List[string]
+  if (-not $List) { return $output }
+  try {
+    $listBounds = $List.Current.BoundingRectangle
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $elements = $List.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        $type = $element.Current.ControlType
+        if ($type -ne [System.Windows.Automation.ControlType]::ListItem -and $type -ne [System.Windows.Automation.ControlType]::Text) { continue }
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Width -lt 2 -or $rect.Height -lt 2 -or $rect.X -lt ($listBounds.X - 2) -or $rect.X -gt ($listBounds.X + $listBounds.Width)) { continue }
+        $name = ([string]$element.Current.Name -replace "\s+", " ").Trim()
+        if ((Is-WeChatImportedContactName $name) -and $seen.Add($name)) { $output.Add($name) }
+      } catch {}
+    }
+  } catch {}
+  return $output
+}
+
+function Find-WeChatContactsList($Root) {
+  if (-not (Test-WeChatContactsActive $Root)) { return $null }
+  try {
+    $rootBounds = $Root.Current.BoundingRectangle
+    $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::List)
+    $lists = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    $best = $null
+    $bestScore = -1
+    foreach ($list in $lists) {
+      try {
+        $rect = $list.Current.BoundingRectangle
+        if ($rect.Width -lt 100 -or $rect.Height -lt 120) { continue }
+        $centerX = $rect.X + $rect.Width / 2
+        if ($centerX -lt ($rootBounds.X + 55) -or $centerX -gt ($rootBounds.X + $rootBounds.Width * 0.62)) { continue }
+        $score = @(Read-WeChatVisibleContacts $list).Count * 10000 + [int]$rect.Height
+        if ($score -gt $bestScore) { $best = $list; $bestScore = $score }
+      } catch {}
+    }
+    return $best
+  } catch {}
+  return $null
+}
+
+function Scroll-WeChatContactsList($List) {
   try {
     $pattern = $List.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
     if ($pattern.Current.VerticallyScrollable) {
@@ -493,12 +498,22 @@ function Scroll-List($List) {
     }
   } catch {}
   try {
-    $rectangle = $List.Current.BoundingRectangle
-    [QiyuMouse]::Click([int]($rectangle.X + $rectangle.Width / 2), [int]($rectangle.Y + [Math]::Min($rectangle.Height - 25, 90)))
-    [System.Windows.Forms.SendKeys]::SendWait("{PGDN}")
-    return $true
+    $List.SetFocus()
+    return [QiyuKeyboard]::SendPageDown()
   } catch {}
   return $false
+}
+
+function Wait-ForWeChatContactsList([int]$Attempts = 14) {
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    $root = Get-WeChatRoot -NoActivate
+    if (Test-WeChatContactsActive $root) {
+      $list = Find-WeChatContactsList $root
+      if ($list -and @(Read-WeChatVisibleContacts $list).Count -gt 0) { return @{ root = $root; list = $list; ready = $true } }
+    }
+    Start-Sleep -Milliseconds 450
+  }
+  return @{ root = $null; list = $null; ready = $false }
 }
 
 function Read-VisibleChatMessages($Root) {
@@ -580,11 +595,9 @@ try {
     }
     "scan-contacts" {
       $root = Get-WeChatRoot
-      $navigationResult = Open-WeChatContacts $root
-      if (-not $navigationResult) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_NOT_CONFIRMED"; message = "CONTACTS_VIEW_NOT_CONFIRMED" } 2 }
-      $navigation = [string]$navigationResult.method
-      $railTarget = $navigationResult.railTarget
-      $ready = Wait-ForWeChatContactList $railTarget -NoActivate
+      $navigation = Open-WeChatContacts $root
+      if (-not $navigation) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_NOT_CONFIRMED"; message = "CONTACTS_VIEW_NOT_CONFIRMED" } 2 }
+      $ready = Wait-ForWeChatContactsList 14
       $root = $ready.root
       $list = $ready.list
       if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "CONTACTS_LIST_NOT_READY"; message = "CONTACTS_LIST_NOT_READY" } 2 }
@@ -592,18 +605,21 @@ try {
       $stagnant = 0
       $pages = 0
       for ($page = 0; $page -lt 240; $page++) {
-        if (-not (Test-WeChatContactsView $root $railTarget)) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_LOST"; message = "CONTACTS_VIEW_LOST" } 2 }
+        if (-not (Test-WeChatContactsActive $root)) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_LOST"; message = "CONTACTS_VIEW_LOST" } 2 }
         $before = $contacts.Count
-        foreach ($name in (Read-VisibleListNames $list)) { $contacts.Add($name) | Out-Null }
+        foreach ($name in (Read-WeChatVisibleContacts $list)) { $contacts.Add($name) | Out-Null }
         $pages++
         if ($contacts.Count -eq $before) { $stagnant++ } else { $stagnant = 0 }
         if ($stagnant -ge 6) { break }
-        if (-not (Scroll-List $list)) { break }
-        Start-Sleep -Milliseconds 250
+        if (-not (Scroll-WeChatContactsList $list)) { break }
+        Start-Sleep -Milliseconds 350
+        $root = Get-WeChatRoot -NoActivate
+        $list = Find-WeChatContactsList $root
+        if (-not $list) { Write-Result @{ ok = $false; error = "CONTACTS_LIST_NOT_READY"; message = "CONTACTS_LIST_NOT_READY" } 2 }
       }
       $result = @($contacts) | Sort-Object
       if ($result.Count -eq 0) { Write-Result @{ ok = $false; error = "NO_CONTACTS_FOUND"; message = "NO_CONTACTS_FOUND" } 3 }
-      Write-Result @{ ok = $true; contacts = $result; count = $result.Count; pages = $pages; navigation = $navigation }
+      Write-Result @{ ok = $true; contacts = $result; count = $result.Count; pages = $pages; navigation = ([string]$navigation.method) }
     }
     "scan-inbox" {
       $root = Get-WeChatRoot
