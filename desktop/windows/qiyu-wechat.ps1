@@ -12,6 +12,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Drawing
 
 Add-Type @"
 using System;
@@ -33,6 +34,7 @@ public static class QiyuMouse {
   public int Bottom;
  }
 public static class QiyuWindow {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -46,6 +48,8 @@ public static class QiyuWindow {
   }
 }
 "@
+
+try { [QiyuWindow]::SetProcessDPIAware() | Out-Null } catch {}
 
 function Write-Result([hashtable]$Value, [int]$ExitCode = 0) {
   $Value | ConvertTo-Json -Depth 8 -Compress
@@ -312,32 +316,6 @@ function Get-WeChatRailCandidates($Root) {
   return $candidates
 }
 
-function New-WeChatRailTarget($Candidate, [string]$Proof) {
-  if (-not $Candidate) { return $null }
-  return [pscustomobject]@{
-    x = [int]$Candidate.centerX
-    y = [int]$Candidate.centerY
-    proof = $Proof
-  }
-}
-
-function Find-WeChatContactsRailTarget($Root) {
-  if (-not $Root) { return $null }
-  try {
-    $bounds = Get-WeChatScreenBounds $Root
-    if (-not $bounds) { return $null }
-    # UIA rectangles can be DPI-virtualized while mouse_event uses physical
-    # screen pixels.  GetWindowRect keeps the click in the same coordinate
-    # system as the visible WeChat window.
-    return [pscustomobject]@{
-      x = [int]($bounds.X + 24)
-      y = [int]($bounds.Y + 130)
-      proof = "physical_main_window_contacts_geometry"
-    }
-  } catch {}
-  return $null
-}
-
 function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
   if (-not $Root -or -not $ExpectedRailTarget) { return $false }
   if ($ExpectedRailTarget.proof -notin @("named_contacts", "next_after_selected_chats", "next_after_named_chats")) { return $false }
@@ -348,6 +326,47 @@ function Test-WeChatContactsRailSelection($Root, $ExpectedRailTarget) {
       $distance = [Math]::Abs($item.centerX - $ExpectedRailTarget.x) + [Math]::Abs($item.centerY - $ExpectedRailTarget.y)
       if ($distance -le 22) { return $true }
     }
+  } catch {}
+  return $false
+}
+
+function Get-WeChatRailGreenScore($Bounds, [int]$CenterOffset) {
+  $bitmap = $null
+  $graphics = $null
+  try {
+    $width = 38
+    $height = 38
+    $originX = [int]$Bounds.X + 5
+    $originY = [int]$Bounds.Y + $CenterOffset - [int]($height / 2)
+    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($originX, $originY, 0, 0, $bitmap.Size)
+    $score = 0
+    for ($x = 0; $x -lt $width; $x += 2) {
+      for ($y = 0; $y -lt $height; $y += 2) {
+        $pixel = $bitmap.GetPixel($x, $y)
+        if ($pixel.G -ge 95 -and $pixel.G -ge ($pixel.R + 24) -and $pixel.G -ge ($pixel.B + 12)) { $score++ }
+      }
+    }
+    return $score
+  } catch {}
+  finally {
+    if ($graphics) { $graphics.Dispose() }
+    if ($bitmap) { $bitmap.Dispose() }
+  }
+  return 0
+}
+
+function Test-WeChatContactsRailVisual($Root) {
+  if (-not $Root) { return $false }
+  try {
+    $bounds = Get-WeChatScreenBounds $Root
+    if (-not $bounds -or $bounds.Width -lt 300 -or $bounds.Height -lt 260) { return $false }
+    # WeChat paints the active rail item green.  This confirms the shortcut
+    # result without clicking either rail icon, even when UIA omits labels.
+    $chatScore = Get-WeChatRailGreenScore $bounds 90
+    $contactsScore = Get-WeChatRailGreenScore $bounds 130
+    return $contactsScore -ge 18 -and $contactsScore -gt ($chatScore + 8)
   } catch {}
   return $false
 }
@@ -371,7 +390,8 @@ function Test-WeChatContactsView($Root, $ExpectedRailTarget = $null) {
     }
     if ($found.Count -ge 2) { return $true }
   } catch {}
-  return Test-WeChatContactsRailSelection $Root $ExpectedRailTarget
+  if (Test-WeChatContactsRailSelection $Root $ExpectedRailTarget) { return $true }
+  return Test-WeChatContactsRailVisual $Root
 }
 
 function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts = 10) {
@@ -394,25 +414,6 @@ function Open-WeChatContacts($Root) {
     $verifiedRoot = Wait-ForWeChatContactsView $null 8
     if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "keyboard_contacts_shortcut"; railTarget = $null } }
 
-    # Some WeChat builds may have the shortcut disabled.  Retain a physical
-    # rail click only as a verified fallback, never as evidence of success.
-    $bounds = Get-WeChatScreenBounds $Root
-    if (-not $bounds) { return $null }
-    $target = Find-WeChatContactsRailTarget $Root
-    if ($target) {
-      # UIA Invoke can activate a wrapper instead of the visible icon.  Click
-      # the visible icon centre directly; this is the same user action.
-      [QiyuMouse]::Click($target.x, $target.y)
-      $method = [string]$target.proof
-    } else {
-      $x = [int]($bounds.X + 24)
-      $y = [int]($bounds.Y + 130)
-      [QiyuMouse]::Click($x, $y)
-      $method = "contacts_fixed_rail_geometry"
-      $target = [pscustomobject]@{ x = $x; y = $y; proof = "physical_main_window_contacts_geometry" }
-    }
-    $verifiedRoot = Wait-ForWeChatContactsView $target
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = $method; railTarget = $target } }
   } catch {}
   return $null
 }

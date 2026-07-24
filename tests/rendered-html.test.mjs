@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.16 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.17 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -35,7 +35,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.16 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.16");
+  assert.equal(packageJson.version, "0.5.17");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -47,9 +47,9 @@ test("packages the Mac and Windows automation adapters in the 0.5.16 desktop ass
   assert.match(windowsHelperText, /AutomationElement\]::FromHandle/);
   assert.match(windowsHelperText, /Get-WeChatScreenBounds/);
   assert.match(windowsHelperText, /GetWindowRect/);
-  assert.match(windowsHelperText, /physical_main_window_contacts_geometry/);
-  assert.match(windowsHelperText, /\$bounds\.X \+ 24/);
-  assert.match(windowsHelperText, /\$bounds\.Y \+ 130/);
+  assert.match(windowsHelperText, /SetProcessDPIAware/);
+  assert.match(windowsHelperText, /Test-WeChatContactsRailVisual/);
+  assert.match(windowsHelperText, /Get-WeChatRailGreenScore/);
   assert.match(windowsHelperText, /ShowWindowAsync/);
   assert.match(windowsHelperText, /SetForegroundWindow/);
   assert.match(windowsHelperText, /CONTACTS_VIEW_NOT_CONFIRMED/);
@@ -57,6 +57,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.16 desktop ass
   assert.doesNotMatch(windowsHelperText, /RootElement\]::RootElement\.FindFirst/);
   assert.match(windowsHelperText, /keyboard_contacts_shortcut/);
   assert.match(windowsHelperText, /SendWait\("\^2"\)/);
+  assert.doesNotMatch(windowsHelperText, /\[QiyuMouse\]::Click\(\$target\.x, \$target\.y\)/);
   assert.doesNotMatch(windowsHelperText, /\$bounds\.Height \* 0\.26/);
   assert.doesNotMatch(windowsHelperText, /Max\(185/);
   assert.doesNotMatch(windowsHelperText, /foreach \(\$offset in @\(180, 225, 270\)\)/);
