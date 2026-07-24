@@ -386,6 +386,16 @@ function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts 
 function Open-WeChatContacts($Root) {
   if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts"; railTarget = $null } }
   try {
+    # WeChat owns the left navigation rail.  Its native Ctrl+2 shortcut is
+    # independent of the window position, DPI scaling, and injected mouse
+    # coordinates.  Confirm the resulting page before scanning anything.
+    [System.Windows.Forms.SendKeys]::SendWait("^2")
+    Start-Sleep -Milliseconds 650
+    $verifiedRoot = Wait-ForWeChatContactsView $null 8
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "keyboard_contacts_shortcut"; railTarget = $null } }
+
+    # Some WeChat builds may have the shortcut disabled.  Retain a physical
+    # rail click only as a verified fallback, never as evidence of success.
     $bounds = Get-WeChatScreenBounds $Root
     if (-not $bounds) { return $null }
     $target = Find-WeChatContactsRailTarget $Root
