@@ -27,6 +27,41 @@ public static class QiyuMouse {
   }
 }
  [StructLayout(LayoutKind.Sequential)]
+ public struct QiyuKeyboardInput {
+  public uint type;
+  public QiyuKeyboardInputUnion data;
+ }
+ [StructLayout(LayoutKind.Explicit)]
+ public struct QiyuKeyboardInputUnion {
+  [FieldOffset(0)] public QiyuKeybdInput keyboard;
+ }
+ [StructLayout(LayoutKind.Sequential)]
+ public struct QiyuKeybdInput {
+  public ushort virtualKey;
+  public ushort scanCode;
+  public uint flags;
+  public uint time;
+  public UIntPtr extraInfo;
+ }
+ public static class QiyuKeyboard {
+  const uint INPUT_KEYBOARD = 1;
+  const uint KEYEVENTF_KEYUP = 0x0002;
+  const ushort VK_CONTROL = 0x11;
+  const ushort VK_2 = 0x32;
+  [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint count, QiyuKeyboardInput[] inputs, int size);
+  static QiyuKeyboardInput Key(ushort key, bool keyUp) {
+    QiyuKeyboardInput input = new QiyuKeyboardInput();
+    input.type = INPUT_KEYBOARD;
+    input.data.keyboard.virtualKey = key;
+    input.data.keyboard.flags = keyUp ? KEYEVENTF_KEYUP : 0;
+    return input;
+  }
+  public static bool SendCtrl2() {
+    QiyuKeyboardInput[] inputs = new QiyuKeyboardInput[] { Key(VK_CONTROL, false), Key(VK_2, false), Key(VK_2, true), Key(VK_CONTROL, true) };
+    return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(QiyuKeyboardInput))) == inputs.Length;
+  }
+ }
+ [StructLayout(LayoutKind.Sequential)]
  public struct QiyuWindowRect {
   public int Left;
   public int Top;
@@ -166,8 +201,9 @@ function Activate-WeChat {
   return $process
 }
 
-function Get-WeChatRoot {
-  $process = Activate-WeChat
+function Get-WeChatRoot([switch]$NoActivate) {
+  $process = if ($NoActivate) { Find-WeChatProcess } else { Activate-WeChat }
+  if (-not $process) { throw "没有找到微信主窗口，请确认微信已经登录" }
   $process.Refresh()
   $handle = [IntPtr]$process.MainWindowHandle
   # A process can own invisible helper windows.  FromHandle binds automation
@@ -394,9 +430,9 @@ function Test-WeChatContactsView($Root, $ExpectedRailTarget = $null) {
   return Test-WeChatContactsRailVisual $Root
 }
 
-function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts = 10) {
+function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts = 10, [switch]$NoActivate) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-    $root = Get-WeChatRoot
+    $root = Get-WeChatRoot -NoActivate:$NoActivate
     if (Test-WeChatContactsView $root $ExpectedRailTarget) { return $root }
     Start-Sleep -Milliseconds 350
   }
@@ -406,23 +442,30 @@ function Wait-ForWeChatContactsView($ExpectedRailTarget = $null, [int]$Attempts 
 function Open-WeChatContacts($Root) {
   if (Test-WeChatContactsView $Root) { return @{ root = $Root; method = "already_contacts"; railTarget = $null } }
   try {
-    # WeChat owns the left navigation rail.  Its native Ctrl+2 shortcut is
-    # independent of the window position, DPI scaling, and injected mouse
-    # coordinates.  Confirm the resulting page before scanning anything.
-    [System.Windows.Forms.SendKeys]::SendWait("^2")
+    # Ctrl+2 is verified on this WeChat build.  SendInput emits real key-down
+    # and key-up events to the foreground WeChat window; SendKeys can be lost
+    # when the desktop assistant owns the active input queue.
+    $process = Activate-WeChat
+    $handle = [IntPtr]$process.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero -or [QiyuWindow]::GetForegroundWindow() -ne $handle) { return $null }
+    try { $Root.SetFocus() } catch {}
+    Start-Sleep -Milliseconds 120
+    if (-not [QiyuKeyboard]::SendCtrl2()) { return $null }
     Start-Sleep -Milliseconds 650
-    $verifiedRoot = Wait-ForWeChatContactsView $null 8
-    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "keyboard_contacts_shortcut"; railTarget = $null } }
+    # Do not call Activate-WeChat again while the shortcut result is settling:
+    # reactivating the main window can steal focus from WeChat's rail control.
+    $verifiedRoot = Wait-ForWeChatContactsView $null 8 -NoActivate
+    if ($verifiedRoot) { return @{ root = $verifiedRoot; method = "sendinput_contacts_shortcut"; railTarget = $null } }
 
   } catch {}
   return $null
 }
 
-function Wait-ForWeChatContactList($ExpectedRailTarget = $null, [int]$Attempts = 12) {
+function Wait-ForWeChatContactList($ExpectedRailTarget = $null, [int]$Attempts = 12, [switch]$NoActivate) {
   $lastRoot = $null
   $lastList = $null
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-    $root = Get-WeChatRoot
+    $root = Get-WeChatRoot -NoActivate:$NoActivate
     if (-not (Test-WeChatContactsView $root $ExpectedRailTarget)) {
       Start-Sleep -Milliseconds 500
       continue
@@ -541,7 +584,7 @@ try {
       if (-not $navigationResult) { Write-Result @{ ok = $false; error = "CONTACTS_VIEW_NOT_CONFIRMED"; message = "CONTACTS_VIEW_NOT_CONFIRMED" } 2 }
       $navigation = [string]$navigationResult.method
       $railTarget = $navigationResult.railTarget
-      $ready = Wait-ForWeChatContactList $railTarget
+      $ready = Wait-ForWeChatContactList $railTarget -NoActivate
       $root = $ready.root
       $list = $ready.list
       if (-not $list -or -not $ready.ready) { Write-Result @{ ok = $false; error = "CONTACTS_LIST_NOT_READY"; message = "CONTACTS_LIST_NOT_READY" } 2 }
