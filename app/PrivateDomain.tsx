@@ -427,10 +427,6 @@ export function PrivateDomain({ page, notify }: Props) {
       notify("请至少填写一个步骤内容。");
       return;
     }
-    if (module === "auto-reply" && targetMode === "all" && strategy.approval === false) {
-      notify("全部好友模式只能生成草稿。自动发送请改用标签或手动白名单。");
-      return;
-    }
     setSaving(true);
     try {
       await post({
@@ -481,7 +477,7 @@ export function PrivateDomain({ page, notify }: Props) {
       aiEnabled &&
       !onlineDevice.capabilities?.includes("wechat_ai_reply")
     ) {
-      notify("当前电脑助手不支持AI上下文消息，请先升级到0.5.7或更高版本。");
+      notify("当前电脑助手不支持AI上下文消息，请先升级到0.5.22或更高版本。");
       return;
     }
     const automaticSend = plan.settings.approval === false;
@@ -504,7 +500,9 @@ export function PrivateDomain({ page, notify }: Props) {
       await load(true);
       setTab("runs");
       notify(
-        `已创建 ${data.count} 条执行流程，正在“执行记录”中显示实时状态。`,
+        data.monitoring
+          ? `自动回复已启动，正在监听 ${data.count} 位现有联系人；新消息会按当前规则匹配。`
+          : `已创建 ${data.count} 条执行流程，正在“执行记录”中显示实时状态。`,
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "启动失败");
@@ -575,13 +573,14 @@ export function PrivateDomain({ page, notify }: Props) {
       const data = await post({
         action: "contacts_import",
         contacts: selectedSyncNames.map((name) => ({ name })),
+        deviceId: onlineDevice?.deviceId || "",
       });
       setSyncDialog(false);
       setSyncPreview([]);
       setSelectedSyncNames([]);
       await load(true);
       notify(
-        `已导入 ${data.imported} 位联系人，更新 ${data.updated} 位已有联系人。`,
+        `已导入 ${data.imported} 位联系人，更新 ${data.updated} 位已有联系人。${data.greetingsQueued ? `已为 ${data.greetingsQueued} 位新好友创建问候任务。` : ""}`,
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "导入失败");
@@ -1342,33 +1341,43 @@ export function PrivateDomain({ page, notify }: Props) {
                         <option value="greet">新好友问候</option>
                       </select>
                     </label>
-                    <label>
-                      匹配方式
-                      <select
-                        value={strategy.matchType}
-                        onChange={(e) =>
-                          setStrategy({
-                            ...strategy,
-                            matchType: e.target.value,
-                          })
-                        }
-                      >
-                        <option value="contains">包含关键词</option>
-                        <option value="exact">完全匹配</option>
-                        <option value="regex">正则表达式</option>
-                      </select>
-                    </label>
+                    {strategy.type === "keyword" && (
+                      <label>
+                        匹配方式
+                        <select
+                          value={strategy.matchType}
+                          onChange={(e) =>
+                            setStrategy({
+                              ...strategy,
+                              matchType: e.target.value,
+                            })
+                          }
+                        >
+                          <option value="contains">包含关键词</option>
+                          <option value="exact">完全匹配</option>
+                          <option value="regex">正则表达式</option>
+                        </select>
+                      </label>
+                    )}
                   </div>
-                  <label>
-                    触发关键词
-                    <input
-                      value={strategy.keywords}
-                      onChange={(e) =>
-                        setStrategy({ ...strategy, keywords: e.target.value })
-                      }
-                      placeholder="多个关键词用逗号分隔"
-                    />
-                  </label>
+                  {strategy.type === "keyword" && (
+                    <label>
+                      触发关键词
+                      <input
+                        value={strategy.keywords}
+                        onChange={(e) =>
+                          setStrategy({ ...strategy, keywords: e.target.value })
+                        }
+                        placeholder={strategy.matchType === "regex" ? "多个正则用逗号分隔，例如：价格.*优惠" : "多个关键词用逗号分隔"}
+                      />
+                    </label>
+                  )}
+                  {strategy.type === "greet" && (
+                    <p className="context-privacy-note">
+                      <ShieldCheck />
+                      仅在“从微信同步”时新导入的联系人触发一次，不会对已有联系人重复问候。
+                    </p>
+                  )}
                   <div className="field-pair">
                     <label>
                       回复方式
@@ -1783,8 +1792,8 @@ export function PrivateDomain({ page, notify }: Props) {
                       }
                     />
                     <span>
-                      <strong>AI回复先人工审核</strong>
-                      <small>建议正式稳定前保持开启</small>
+                      <strong>人工审核</strong>
+                      <small>{strategy.approval ? "已开启：消息只写入微信草稿，需你手动点击发送。" : "已关闭：命中规则后将直接发送微信消息。"}</small>
                     </span>
                   </label>
                 </>

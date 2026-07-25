@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.21 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.22 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText, releaseScriptText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -36,7 +36,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.21 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.21");
+  assert.equal(packageJson.version, "0.5.22");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -392,6 +392,30 @@ test("generates WeChat replies from local chat context, customer data, and enter
   assert.match(agent, /wechat_ai_reply/);
   assert.match(swift, /--chat-history/);
   assert.match(windows, /"scan-history"/);
+});
+
+test("processes every verified unread conversation and honors auto-reply trigger rules", async () => {
+  const [page, automation, privateRoute, agent, windows] = await Promise.all([
+    readFile(new URL("app/PrivateDomain.tsx", root), "utf8"),
+    readFile(new URL("app/api/automation/route.ts", root), "utf8"),
+    readFile(new URL("app/api/private-domain/route.ts", root), "utf8"),
+    readFile(new URL("desktop/agent.cjs", root), "utf8"),
+    readFile(new URL("desktop/windows/qiyu-wechat.ps1", root), "utf8"),
+  ]);
+
+  assert.match(windows, /Read-VisibleInboxRows/);
+  assert.match(windows, /Test-ChatTarget/);
+  assert.match(windows, /conversation_not_verified/);
+  assert.match(agent, /conversations\.slice\(0, 12\)/);
+  assert.match(agent, /scanWechatChatContext\(contact, 40\)/);
+  assert.match(automation, /matchesAutoReplyRule/);
+  assert.match(automation, /matchType === "exact"/);
+  assert.match(automation, /matchType === "regex"/);
+  assert.match(automation, /incomingWechatEvents/);
+  assert.match(privateRoute, /queueNewFriendGreetings/);
+  assert.match(privateRoute, /正则表达式无效/);
+  assert.match(page, /已开启：消息只写入微信草稿/);
+  assert.match(page, /已关闭：命中规则后将直接发送微信消息/);
 });
 
 test("blocks outdated automation clients and shows broadcast execution status immediately", async () => {

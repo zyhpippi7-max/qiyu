@@ -65,6 +65,83 @@ async function triggerNewContactWorkflows(workspaceId: number, contacts: Array<{
   return statements.length;
 }
 
+async function autoReplyPlanIncludesContact(plan: Record<string, unknown>, contactId: number, workspaceId: number) {
+  const targets = parsed(plan.targetValue, []) as unknown[];
+  const mode = String(plan.targetMode || "all");
+  if (mode === "all") return true;
+  if (mode === "contacts" || mode === "manual") return targets.map(Number).includes(contactId);
+  if (mode !== "tags") return false;
+  const tagIds = targets.map(Number).filter(Boolean);
+  if (!tagIds.length) return false;
+  const placeholders = tagIds.map(() => "?").join(",");
+  const row = await env.DB.prepare(`SELECT 1 AS found FROM private_contact_tags ct JOIN private_tags t ON t.id=ct.tag_id
+    WHERE ct.contact_id=? AND t.workspace_id=? AND ct.tag_id IN (${placeholders}) LIMIT 1`).bind(contactId, workspaceId, ...tagIds).first();
+  return Boolean(row);
+}
+
+async function queueNewFriendGreetings(workspaceId: number, deviceId: string, contacts: Array<{ id: number; name: string }>) {
+  if (!deviceId || !contacts.length) return 0;
+  const plans = await env.DB.prepare(`SELECT id,target_mode AS targetMode,target_value AS targetValue,settings
+    FROM private_plans WHERE workspace_id=? AND module='auto-reply' AND status='active' ORDER BY id`).bind(workspaceId).all();
+  let queued = 0;
+  for (const contact of contacts) {
+    for (const plan of plans.results as Record<string, unknown>[]) {
+      const settings = parsed(plan.settings, {}) as Record<string, unknown>;
+      if (String(settings.type || "") !== "greet") continue;
+      if (!(await autoReplyPlanIncludesContact(plan, contact.id, workspaceId))) continue;
+      const fingerprint = `new_friend:${workspaceId}:${Number(plan.id)}:${contact.id}`;
+      const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO private_inbound_messages
+        (fingerprint,device_id,contact_id,contact_name,message,plan_id) VALUES(?,?,?,?,?,?)`)
+        .bind(fingerprint, deviceId, contact.id, contact.name, "新好友已同步", Number(plan.id)).run();
+      if (!inserted.meta.changes) continue;
+      const dailyLimit = Math.max(1, Math.min(200, Number(settings.dailyLimit || 20)));
+      const used = await env.DB.prepare(`SELECT COUNT(*) AS count FROM automation_jobs WHERE workspace_id=?
+        AND type IN ('wechat_send','wechat_draft','wechat_ai_reply') AND date(created_at)=date('now')
+        AND json_extract(payload,'$.source')='auto_reply' AND json_extract(payload,'$.planId')=?`)
+        .bind(workspaceId, Number(plan.id)).first<{ count: number }>();
+      if (Number(used?.count || 0) >= dailyLimit) {
+        await env.DB.prepare("UPDATE private_inbound_messages SET status='daily_limit' WHERE fingerprint=?").bind(fingerprint).run();
+        continue;
+      }
+      const automaticSend = settings.approval === false;
+      const aiEnabled = settings.replyType === "ai" || settings.aiEnabled === true;
+      const type = aiEnabled ? "wechat_ai_reply" : automaticSend ? "wechat_send" : "wechat_draft";
+      let response = "";
+      if (!aiEnabled) {
+        const step = await env.DB.prepare("SELECT content FROM private_plan_steps WHERE plan_id=? AND enabled=1 ORDER BY step_order LIMIT 1").bind(Number(plan.id)).first<{ content: string }>();
+        response = String(step?.content || "").trim();
+        if (!response) {
+          await env.DB.prepare("UPDATE private_inbound_messages SET status='no_response' WHERE fingerprint=?").bind(fingerprint).run();
+          continue;
+        }
+      }
+      const payload = aiEnabled ? {
+        contact: contact.name,
+        goal: String(settings.aiPrompt || "用自然、简短的语气欢迎新好友，并询问对方需要什么帮助。"),
+        sendApproved: automaticSend,
+        source: "auto_reply",
+        planId: Number(plan.id),
+        inboundFingerprint: fingerprint,
+        aiSettings: {
+          expertRole: String(settings.expertRole || "private"), modelTier: String(settings.modelTier || "smart"),
+          businessContext: String(settings.businessContext || ""), useKnowledge: settings.useKnowledge !== false,
+          useCustomerData: settings.useCustomerData !== false, useChatHistory: false,
+          historyLimit: Math.max(30, Math.min(50, Number(settings.historyLimit || 40))),
+        },
+      } : {
+        contact: contact.name, message: response, sendApproved: automaticSend, source: "auto_reply",
+        planId: Number(plan.id), inboundFingerprint: fingerprint,
+      };
+      await env.DB.prepare("INSERT INTO automation_jobs(workspace_id,device_id,type,payload,status) VALUES(?,?,?,?,'queued')")
+        .bind(workspaceId, deviceId, type, JSON.stringify(payload)).run();
+      await env.DB.prepare("UPDATE private_inbound_messages SET response=?,status=? WHERE fingerprint=?")
+        .bind(response, automaticSend ? "queued_send" : "queued_review", fingerprint).run();
+      queued += 1;
+    }
+  }
+  return queued;
+}
+
 async function contactsWithTags(workspaceId: number) {
   const contacts = await env.DB.prepare(`SELECT id,name,remark,source,status,last_contact_at AS lastContactAt,created_at AS createdAt FROM private_contacts WHERE workspace_id=? ORDER BY updated_at DESC`).bind(workspaceId).all();
   const tagRows = await env.DB.prepare(`SELECT ct.contact_id AS contactId,t.id,t.name,t.color FROM private_contact_tags ct JOIN private_tags t ON t.id=ct.tag_id JOIN private_contacts c ON c.id=ct.contact_id WHERE c.workspace_id=? AND t.workspace_id=?`).bind(workspaceId, workspaceId).all();
@@ -137,6 +214,14 @@ export async function POST(request: Request) {
       return Response.json({ job }, { status: 201 });
     }
     if (action === "contacts_import") {
+      const requestedDeviceId = String(body.deviceId || "").trim();
+      let greetingDeviceId = "";
+      if (requestedDeviceId) {
+        const device = await env.DB.prepare("SELECT device_id AS deviceId FROM automation_devices WHERE device_id=? AND workspace_id=?")
+          .bind(requestedDeviceId, user.workspaceId).first<{ deviceId: string }>();
+        if (!device) return fail("电脑助手不存在或不属于当前工作空间", 404);
+        greetingDeviceId = device.deviceId;
+      }
       const input = Array.isArray(body.contacts) ? body.contacts.slice(0, 5000) : [];
       const names = [...new Set(input.map(item => String(typeof item === "string" ? item : (item as Record<string, unknown>)?.name || "").replace(/\s+/g, " ").trim()).filter(name => name.length >= 1 && name.length <= 80))];
       if (!names.length) return fail("请选择要导入的联系人");
@@ -154,7 +239,8 @@ export async function POST(request: Request) {
         addedContacts.push(...rows.results);
       }
       const workflowTriggered = await triggerNewContactWorkflows(user.workspaceId, addedContacts);
-      return Response.json({ ok: true, imported, updated: names.length - imported, total: names.length, workflowTriggered });
+      const greetingsQueued = await queueNewFriendGreetings(user.workspaceId, greetingDeviceId, addedContacts);
+      return Response.json({ ok: true, imported, updated: names.length - imported, total: names.length, workflowTriggered, greetingsQueued });
     }
     if (action === "contact_delete") { const contact = await env.DB.prepare("SELECT id FROM private_contacts WHERE id=? AND workspace_id=?").bind(body.id, user.workspaceId).first(); if (!contact) return fail("联系人不存在", 404); await env.DB.batch([env.DB.prepare("DELETE FROM private_contact_tags WHERE contact_id=?").bind(body.id), env.DB.prepare("DELETE FROM private_contacts WHERE id=? AND workspace_id=?").bind(body.id, user.workspaceId)]); return Response.json({ ok: true }); }
     if (action === "tag_save") {
@@ -171,7 +257,16 @@ export async function POST(request: Request) {
     }
     if (action === "plan_save") {
       const name = String(body.name || "").trim(); const module = String(body.module || "activation"); if (!name) return fail("请输入方案名称");
-      const id = Number(body.id || 0); const targetValue = JSON.stringify(body.targetValue || []); const settings = JSON.stringify(body.settings || {}); let planId = id;
+      const planSettings = body.settings && typeof body.settings === "object" ? body.settings as Record<string, unknown> : {};
+      if (module === "auto-reply" && String(planSettings.type || "ai") === "keyword" && String(planSettings.matchType || "contains") === "regex") {
+        const patterns = String(planSettings.keywords || "").split(/[，,、\s]+/).map(pattern => pattern.trim()).filter(Boolean);
+        if (!patterns.length) return fail("请填写至少一条正则表达式");
+        for (const pattern of patterns) {
+          if (pattern.length > 120) return fail("单条正则表达式不能超过120个字符");
+          try { new RegExp(pattern, "i"); } catch { return fail(`正则表达式无效：${pattern}`); }
+        }
+      }
+      const id = Number(body.id || 0); const targetValue = JSON.stringify(body.targetValue || []); const settings = JSON.stringify(planSettings); let planId = id;
       const requestedTargetMode = String(body.targetMode || "all"); const targetMode = ["all","tags","manual","contacts"].includes(requestedTargetMode) ? requestedTargetMode : "all";
       if (id) { const row = await env.DB.prepare("UPDATE private_plans SET name=?,status=?,target_mode=?,target_value=?,settings=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=? RETURNING id").bind(name, String(body.status || "draft"), targetMode, targetValue, settings, id, user.workspaceId).first(); if (!row) return fail("方案不存在", 404); }
       else { const row = await env.DB.prepare("INSERT INTO private_plans(workspace_id,module,name,status,target_mode,target_value,settings) VALUES(?,?,?,?,?,?,?) RETURNING id").bind(user.workspaceId, module, name, String(body.status || "draft"), targetMode, targetValue, settings).first<{id:number}>(); planId = row!.id; }
@@ -185,9 +280,9 @@ export async function POST(request: Request) {
     if (action === "run_plan") {
       const planId = Number(body.planId || 0); const deviceId = String(body.deviceId || "").trim();
       if (!planId || !deviceId) return fail("请选择方案和已配对的电脑助手");
-      const plan = await env.DB.prepare(`SELECT id,target_mode AS targetMode,target_value AS targetValue,settings
+      const plan = await env.DB.prepare(`SELECT id,module,target_mode AS targetMode,target_value AS targetValue,settings
         FROM private_plans WHERE id=? AND workspace_id=?`).bind(planId, user.workspaceId)
-        .first<{ id: number; targetMode: string; targetValue: string; settings: string }>();
+        .first<{ id: number; module: string; targetMode: string; targetValue: string; settings: string }>();
       if (!plan) return fail("方案不存在", 404);
       const device = await env.DB.prepare("SELECT capabilities FROM automation_devices WHERE device_id=? AND workspace_id=?")
         .bind(deviceId, user.workspaceId).first<{ capabilities: string }>();
@@ -196,7 +291,7 @@ export async function POST(request: Request) {
       if (!capabilities.includes("wechat_sop_step")) return fail("电脑助手版本太旧，请先安装最新版");
       const planSettings = parsed(plan.settings, {}) as Record<string, unknown>;
       const aiEnabled = planSettings.aiEnabled === true || planSettings.replyType === "ai";
-      if (aiEnabled && !capabilities.includes("wechat_ai_reply")) return fail("当前电脑助手不支持AI上下文消息，请升级后再试");
+      if (aiEnabled && !capabilities.includes("wechat_ai_reply")) return fail("当前电脑助手不支持AI上下文消息，请升级到0.5.22或更高版本");
       let contactIds = Array.isArray(parsed(plan.targetValue, [])) ? parsed(plan.targetValue, []) as number[] : [];
       if (plan.targetMode === "all") {
         const rows = await env.DB.prepare("SELECT id FROM private_contacts WHERE workspace_id=? AND status='active' ORDER BY id").bind(user.workspaceId).all();
@@ -217,7 +312,11 @@ export async function POST(request: Request) {
           .bind(user.workspaceId, ...contactIds).all();
         contactIds = valid.results.map(row => Number(row.id));
       }
-      if (!contactIds.length) return fail(plan.targetMode === "all" ? "当前还没有可执行的好友" : "方案还没有选择有效目标联系人");
+      if (!contactIds.length && plan.module !== "auto-reply") return fail(plan.targetMode === "all" ? "当前还没有可执行的好友" : "方案还没有选择有效目标联系人");
+      if (plan.module === "auto-reply") {
+        await env.DB.prepare("UPDATE private_plans SET status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?").bind(plan.id, user.workspaceId).run();
+        return Response.json({ ok: true, count: contactIds.length, monitoring: true });
+      }
       const activeRows = await env.DB.prepare(`SELECT contact_id AS contactId FROM private_runs WHERE workspace_id=? AND plan_id=?
         AND status IN ('scheduled','running')`).bind(user.workspaceId, plan.id).all();
       const activeContactIds = new Set(activeRows.results.map(row => Number(row.contactId)));

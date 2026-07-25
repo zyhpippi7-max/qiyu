@@ -2,7 +2,8 @@
   [Parameter(Mandatory = $true)]
   [ValidateSet("probe", "open", "focus-contact", "paste-draft", "paste-send", "scan-contacts", "scan-inbox", "scan-history", "open-moments")]
   [string]$Mode,
-  [int]$Limit = 40
+  [int]$Limit = 40,
+  [string]$Contact = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -479,6 +480,85 @@ function Read-WeChatVisibleContacts($List) {
   return $output
 }
 
+function Normalize-UiText([string]$Value) {
+  return ($Value -replace "\s+", " ").Trim()
+}
+
+function Has-UnreadMarker([string]$Value) {
+  return (Normalize-UiText $Value) -match "(\[\d+\]|\d+条新消息|未读)"
+}
+
+function Is-InboxMetadata([string]$Value) {
+  $text = Normalize-UiText $Value
+  return $text -match "^(\d{1,2}:\d{2}|昨天|前天|星期.|周.|置顶|免打扰|新消息|未读|\[\d+\]|\d+条新消息)$"
+}
+
+function Get-InboxContactName($Item) {
+  $names = New-Object System.Collections.Generic.List[string]
+  try {
+    $elements = $Item.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      try {
+        if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Text -and $element.Current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { continue }
+        $name = Normalize-UiText ([string]$element.Current.Name)
+        if ((Is-ContactName $name) -and -not (Has-UnreadMarker $name) -and -not (Is-InboxMetadata $name) -and -not $names.Contains($name)) { [void]$names.Add($name) }
+      } catch {}
+    }
+  } catch {}
+  if ($names.Count -gt 0) { return $names[0] }
+  $rowName = Normalize-UiText ([string]$Item.Current.Name)
+  $prefix = ($rowName -split "(\[\d+\]|\d+条新消息|未读)")[0].Trim()
+  if (Is-ContactName $prefix) { return $prefix }
+  return ""
+}
+
+function Read-VisibleInboxRows($List) {
+  $rows = New-Object System.Collections.Generic.List[object]
+  $seen = New-Object System.Collections.Generic.HashSet[string]
+  if (-not $List) { return @($rows) }
+  try {
+    $items = $List.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($item in $items) {
+      if ($item.Current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { continue }
+      $rowName = Normalize-UiText ([string]$item.Current.Name)
+      $unread = Has-UnreadMarker $rowName
+      if (-not $unread) {
+        try {
+          $children = $item.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+          foreach ($child in $children) {
+            if (Has-UnreadMarker ([string]$child.Current.Name)) { $unread = $true; break }
+          }
+        } catch {}
+      }
+      if (-not $unread) { continue }
+      $contact = Get-InboxContactName $item
+      if (-not $contact) { continue }
+      $key = "$contact|$rowName"
+      if ($seen.Add($key)) { $rows.Add([pscustomobject]@{ contact = $contact; row = $rowName }) }
+    }
+  } catch {}
+  return @($rows)
+}
+
+function Test-ChatTarget($Root, [string]$ExpectedContact) {
+  $expected = Normalize-UiText $ExpectedContact
+  if (-not $expected) { return $true }
+  try {
+    $bounds = $Root.Current.BoundingRectangle
+    $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      $name = Normalize-UiText ([string]$element.Current.Name)
+      if ($name -ne $expected) { continue }
+      $rect = $element.Current.BoundingRectangle
+      if ($rect.Width -lt 2 -or $rect.Height -lt 2) { continue }
+      $centerX = $rect.X + $rect.Width / 2
+      $centerY = $rect.Y + $rect.Height / 2
+      if ($centerX -ge ($bounds.X + $bounds.Width * 0.34) -and $centerY -le ($bounds.Y + [Math]::Min(150, $bounds.Height * 0.22))) { return $true }
+    }
+  } catch {}
+  return $false
+}
+
 function Find-WeChatContactsList($Root) {
   if (-not (Test-WeChatContactsActive $Root)) { return $null }
   try {
@@ -593,7 +673,9 @@ try {
       Start-Sleep -Milliseconds 900
       [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
       Start-Sleep -Milliseconds 800
-      Write-Result @{ ok = $true; message = "联系人会话已打开" }
+      $root = Get-WeChatRoot
+      if ($Contact -and -not (Test-ChatTarget $root $Contact)) { Write-Result @{ ok = $false; error = "conversation_not_verified"; message = "没有可靠打开并验证联系人[$Contact]，已停止操作" } 4 }
+      Write-Result @{ ok = $true; contact = $Contact; verified = [bool]$Contact; message = "联系人会话已打开并验证" }
     }
     "paste-draft" {
       Activate-WeChat | Out-Null
@@ -642,22 +724,18 @@ try {
       $root = Get-WeChatRoot
       $list = Find-BestList $root
       if (-not $list) { Write-Result @{ ok = $true; unread = $false; message = "没有未读消息" } }
-      $items = Read-VisibleListNames $list
-      $unreadItem = $null
-      foreach ($item in $items) {
-        if ($item -match "(\[\d+\]|\d+条新消息|未读)") { $unreadItem = $item; break }
-      }
-      if (-not $unreadItem) { Write-Result @{ ok = $true; unread = $false; message = "没有未读消息" } }
-      $contact = ($unreadItem -split "\s+|\[")[0].Trim()
-      Write-Result @{ ok = $true; unread = $true; contact = $contact; message = $unreadItem }
+      $conversations = @(Read-VisibleInboxRows $list)
+      if ($conversations.Count -eq 0) { Write-Result @{ ok = $true; unread = $false; message = "没有可可靠识别的未读会话" } }
+      Write-Result @{ ok = $true; unread = $true; conversations = $conversations; count = $conversations.Count }
     }
     "scan-history" {
       $root = Get-WeChatRoot
+      if ($Contact -and -not (Test-ChatTarget $root $Contact)) { Write-Result @{ ok = $false; error = "conversation_not_verified"; message = "当前聊天窗口未验证为联系人[$Contact]，已停止读取" } 4 }
       $history = @(Read-ChatHistory $root $Limit)
       if ($history.Count -eq 0) {
         Write-Result @{ ok = $false; error = "history_not_exposed"; message = "当前微信版本没有向Windows辅助功能暴露聊天文字，请将目标会话保持在前台后重试" } 5
       }
-      Write-Result @{ ok = $true; history = $history; count = $history.Count; source = "windows_uia" }
+      Write-Result @{ ok = $true; history = $history; count = $history.Count; contact = $Contact; verified = [bool]$Contact; source = "windows_uia" }
     }
     "open-moments" {
       $root = Get-WeChatRoot

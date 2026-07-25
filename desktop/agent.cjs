@@ -158,7 +158,7 @@ class QiyuAgent {
     await this.openWechat();
     if (process.platform === "win32") {
       clipboard.writeText(contact);
-      let result = await this.runWindowsWechat("focus-contact");
+      let result = await this.runWindowsWechat("focus-contact", ["-Contact", String(contact)]);
       if (!result.ok) throw new Error(result.output || "没有找到已登录的微信窗口");
       clipboard.writeText(message);
       result = await this.runWindowsWechat(shouldSend ? "paste-send" : "paste-draft");
@@ -232,13 +232,22 @@ class QiyuAgent {
       let data;
       try { data = JSON.parse(result.output); } catch { throw new Error(result.output || "微信消息识别没有返回有效结果"); }
       if (!result.ok || !data?.ok) throw new Error(data?.message || data?.error || "微信消息识别失败");
-      if (data.unread && data.contact && !Array.isArray(data.history)) {
+      const conversations = Array.isArray(data.conversations) ? data.conversations : [];
+      const messages = [];
+      const seen = new Set();
+      for (const candidate of conversations.slice(0, 12)) {
+        const contact = String(candidate?.contact || "").trim();
+        if (!contact || seen.has(contact)) continue;
+        seen.add(contact);
         try {
-          const context = await this.scanWechatChatContext(data.contact, 40);
-          data.history = context.history;
-        } catch { data.history = data.message ? [{ direction: "incoming", text: data.message }] : []; }
+          const context = await this.scanWechatChatContext(contact, 40);
+          const incoming = [...context.history].reverse().find(item => item.direction === "incoming" && String(item.text || "").trim());
+          if (incoming) messages.push({ contact, message: String(incoming.text).trim(), history: context.history });
+        } catch (error) {
+          this.log(`未读会话“${contact}”未通过联系人验证，已跳过：${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-      return data;
+      return { ...data, unread: messages.length > 0, messages, scanned: conversations.length };
     }
     if (process.platform !== "darwin") throw new Error("当前系统暂不支持微信AI接管");
     await this.openWechat();
@@ -268,9 +277,9 @@ class QiyuAgent {
     await this.openWechat();
     if (process.platform === "win32") {
       clipboard.writeText(contact);
-      const focused = await this.runWindowsWechat("focus-contact");
+      const focused = await this.runWindowsWechat("focus-contact", ["-Contact", String(contact)]);
       if (!focused.ok) throw new Error(focused.output || "没有打开联系人会话");
-      const result = await this.runWindowsWechat("scan-history", ["-Limit", String(safeLimit)], 90000);
+      const result = await this.runWindowsWechat("scan-history", ["-Limit", String(safeLimit), "-Contact", String(contact)], 90000);
       let data;
       try { data = JSON.parse(result.output); } catch { throw new Error(result.output || "Windows 微信没有返回聊天上下文"); }
       if (!result.ok || !data?.ok) throw new Error(data?.message || data?.error || "Windows 微信未暴露可读取的聊天内容");
@@ -492,11 +501,11 @@ class QiyuAgent {
           history: historyResult.history, settings: payload.aiSettings || {},
         });
         const executed = await this.wechatDraft(payload.contact, generated.content, payload.sendApproved === true);
-        return { ...executed, aiGenerated: true, historyCount: generated.historyCount, knowledgeUsed: generated.knowledgeUsed, customerDataUsed: generated.customerDataUsed };
+        return { ...executed, message: generated.content, aiGenerated: true, historyCount: generated.historyCount, knowledgeUsed: generated.knowledgeUsed, customerDataUsed: generated.customerDataUsed };
       }
       case "wechat_draft": return this.wechatDraft(payload.contact, payload.message, false);
       case "wechat_send":
-        if (!payload.sendApproved) throw new Error("缺少人工发送授权");
+        if (!payload.sendApproved) throw new Error("发送开关未授权");
         return this.wechatDraft(payload.contact, payload.message, true);
       case "wechat_sop_step":
         if (payload.action === "wait") return { notice: "等待步骤已完成" };
@@ -516,7 +525,7 @@ class QiyuAgent {
             history: historyResult.history, settings: payload.aiSettings || {},
           });
           const executed = await this.wechatDraft(payload.contact, generated.content, payload.approval === false);
-          return { ...executed, aiGenerated: true, historyCount: generated.historyCount, knowledgeUsed: generated.knowledgeUsed, customerDataUsed: generated.customerDataUsed };
+          return { ...executed, message: generated.content, aiGenerated: true, historyCount: generated.historyCount, knowledgeUsed: generated.knowledgeUsed, customerDataUsed: generated.customerDataUsed };
         }
         return this.wechatDraft(payload.contact, payload.content, payload.approval === false);
       case "platform_open_login": {

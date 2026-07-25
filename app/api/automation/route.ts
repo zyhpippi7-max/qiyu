@@ -235,6 +235,39 @@ async function planIncludesContact(plan: Record<string, unknown>, contactId: num
   return false;
 }
 
+type IncomingWechatEvent = { contact: string; message: string; history: ChatHistoryItem[]; kind: "message" | "new_friend" };
+
+function incomingWechatEvents(value: Record<string, unknown>) {
+  const rows = Array.isArray(value.messages) ? value.messages : [value];
+  return rows.map(row => {
+    const source = row && typeof row === "object" ? row as Record<string, unknown> : {};
+    return {
+      contact: String(source.contact || "").trim(),
+      message: String(source.message || "").replace(/\s+/g, " ").trim(),
+      history: normalizeHistory(source.history, 40),
+      kind: source.kind === "new_friend" ? "new_friend" : "message",
+    } satisfies IncomingWechatEvent;
+  }).filter(event => event.contact && (event.kind === "new_friend" || event.message));
+}
+
+function matchesAutoReplyRule(settings: Record<string, unknown>, event: IncomingWechatEvent) {
+  const type = String(settings.type || "ai");
+  if (type === "greet") return event.kind === "new_friend";
+  if (event.kind !== "message") return false;
+  if (type !== "keyword") return true;
+  const keywords = String(settings.keywords || "").split(/[，,、\s]+/).map(word => word.trim()).filter(Boolean);
+  if (!keywords.length) return false;
+  const message = event.message.trim();
+  const matchType = String(settings.matchType || "contains");
+  if (matchType === "exact") return keywords.some(word => message.localeCompare(word, "zh-Hans-CN", { sensitivity: "accent" }) === 0);
+  if (matchType === "regex") {
+    try { return keywords.some(pattern => new RegExp(pattern, "i").test(message)); }
+    catch { return false; }
+  }
+  const normalizedMessage = message.toLocaleLowerCase();
+  return keywords.some(word => normalizedMessage.includes(word.toLocaleLowerCase()));
+}
+
 async function triggerWechatMessageWorkflows(workspaceId: number, deviceId: string, contact: { id: number; name: string }, message: string, fingerprint: string) {
   const workflows = await env.DB.prepare("SELECT id,title,description,metadata FROM product_records WHERE workspace_id=? AND module='auto-workflow'").bind(workspaceId).all();
   const statements: D1PreparedStatement[] = [];
@@ -249,67 +282,65 @@ async function triggerWechatMessageWorkflows(workspaceId: number, deviceId: stri
   for (let index = 0; index < statements.length; index += 80) await env.DB.batch(statements.slice(index, index + 80));
 }
 
-async function handleInboxResult(jobId: number, status: string) {
-  if (status !== "succeeded") return;
-  const job = await env.DB.prepare("SELECT workspace_id AS workspaceId,device_id AS deviceId,result FROM automation_jobs WHERE id=? AND type='wechat_inbox_scan'").bind(jobId).first<{ workspaceId: number; deviceId: string; result: string }>();
-  if (!job) return;
-  const result = jsonValue(job.result, {}) as Record<string, unknown>;
-  if (result.unread !== true) return;
-  const rawContact = String(result.contact || "").trim(); const message = String(result.message || "").trim();
-  if (!rawContact || !message) return;
-  const contactName = rawContact.replace(/[（(]\d+[）)]\s*$/, "").trim();
-  const contact = await env.DB.prepare("SELECT id,name FROM private_contacts WHERE workspace_id=? AND (name=? OR remark=?) ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END LIMIT 1").bind(job.workspaceId, contactName, contactName, contactName).first<{ id: number; name: string }>();
+async function queueInboundReply(workspaceId: number, deviceId: string, event: IncomingWechatEvent) {
+  const contactName = event.contact.replace(/[（(]\d+[）)]\s*$/, "").trim();
+  const contact = await env.DB.prepare("SELECT id,name FROM private_contacts WHERE workspace_id=? AND (name=? OR remark=?) ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END LIMIT 1").bind(workspaceId, contactName, contactName, contactName).first<{ id: number; name: string }>();
   if (!contact) return;
-  const history = normalizeHistory(result.history, 40);
+  const history = event.history;
   const recentContext = history.slice(-6).map(item => `${item.direction}:${item.text}`).join("|");
   const dayBucket = new Date().toISOString().slice(0, 10);
-  const fingerprint = await digest(`${contact.id}|${message}|${recentContext}|${dayBucket}`);
-  await triggerWechatMessageWorkflows(job.workspaceId, String(job.deviceId || ""), contact, message, fingerprint);
-  const plans = await env.DB.prepare("SELECT id,target_mode AS targetMode,target_value AS targetValue,settings FROM private_plans WHERE workspace_id=? AND module='auto-reply' AND status='active' ORDER BY id").bind(job.workspaceId).all();
+  const fingerprint = await digest(`${event.kind}|${contact.id}|${event.message}|${recentContext}|${dayBucket}`);
+  if (event.kind === "message") await triggerWechatMessageWorkflows(workspaceId, deviceId, contact, event.message, fingerprint);
+  const plans = await env.DB.prepare("SELECT id,target_mode AS targetMode,target_value AS targetValue,settings FROM private_plans WHERE workspace_id=? AND module='auto-reply' AND status='active' ORDER BY id").bind(workspaceId).all();
   let selected: Record<string, unknown> | undefined;
   for (const candidate of plans.results as Record<string, unknown>[]) {
-    if (!(await planIncludesContact(candidate, Number(contact.id), job.workspaceId))) continue;
+    if (!(await planIncludesContact(candidate, Number(contact.id), workspaceId))) continue;
     const settings = jsonValue(candidate.settings, {}) as Record<string, unknown>;
-    const keywords = String(settings.keywords || "").split(/[，,、\s]+/).filter(Boolean);
-    if (String(settings.type || "ai") === "keyword" && keywords.length && !keywords.some(word => message.toLowerCase().includes(word.toLowerCase()))) continue;
+    if (!matchesAutoReplyRule(settings, event)) continue;
     selected = candidate; break;
   }
   if (!selected) return;
   const inserted = await env.DB.prepare("INSERT OR IGNORE INTO private_inbound_messages(fingerprint,device_id,contact_id,contact_name,message,plan_id) VALUES(?,?,?,?,?,?)")
-    .bind(fingerprint,String(job.deviceId||""),contact.id,contact.name,message,selected.id).run();
+    .bind(fingerprint,deviceId,contact.id,contact.name,event.message,selected.id).run();
   if (!inserted.meta.changes) return;
   const settings = jsonValue(selected.settings, {}) as Record<string, unknown>;
   const dailyLimit = Math.max(1, Math.min(200, Number(settings.dailyLimit || 20)));
-  const used = await env.DB.prepare(`SELECT COUNT(*) AS count FROM automation_jobs WHERE workspace_id=? AND type IN ('wechat_send','wechat_draft') AND date(created_at)=date('now') AND json_extract(payload,'$.source')='auto_reply' AND json_extract(payload,'$.planId')=?`).bind(job.workspaceId, selected.id).first<{ count: number }>();
+  const used = await env.DB.prepare(`SELECT COUNT(*) AS count FROM automation_jobs WHERE workspace_id=? AND type IN ('wechat_send','wechat_draft','wechat_ai_reply') AND date(created_at)=date('now') AND json_extract(payload,'$.source')='auto_reply' AND json_extract(payload,'$.planId')=?`).bind(workspaceId, selected.id).first<{ count: number }>();
   if (Number(used?.count || 0) >= dailyLimit) {
     await env.DB.prepare("UPDATE private_inbound_messages SET status='daily_limit' WHERE fingerprint=?").bind(fingerprint).run(); return;
   }
   let response = "";
   if (String(settings.replyType || "ai") === "ai" || settings.aiEnabled === true) {
-    const replyHistory = normalizeHistory(result.history, Number(settings.historyLimit || 40));
-    if (!replyHistory.some(item => item.direction === "incoming" && item.text === message)) replyHistory.push({ direction: "incoming", text: message });
-    const generated = await contextualReply(contact.name, String(settings.aiPrompt || "先解决客户当前问题，再自然推进一个下一步"), replyHistory, settings, job.workspaceId);
+    const replyHistory = normalizeHistory(event.history, Number(settings.historyLimit || 40));
+    if (event.kind === "message" && !replyHistory.some(item => item.direction === "incoming" && item.text === event.message)) replyHistory.push({ direction: "incoming", text: event.message });
+    const generated = await contextualReply(contact.name, String(settings.aiPrompt || (event.kind === "new_friend" ? "用自然、简短的语气欢迎新好友，并询问对方需要什么帮助。" : "先解决客户当前问题，再自然推进一个下一步")), replyHistory, settings, workspaceId);
     response = generated.content;
   } else {
     const step = await env.DB.prepare("SELECT content FROM private_plan_steps WHERE plan_id=? AND enabled=1 ORDER BY step_order LIMIT 1").bind(selected.id).first<{ content: string }>();
     response = String(step?.content || "").trim();
   }
   if (!response) { await env.DB.prepare("UPDATE private_inbound_messages SET status='no_response' WHERE fingerprint=?").bind(fingerprint).run(); return; }
-  const sensitive = /退款|投诉|赔偿|律师|起诉|报警|转账|付款|收款|银行卡|合同|发票|密码|验证码|身份证|账号异常/i.test(message);
-  const enoughContext = history.length >= 2;
-  const approved = settings.approval === false && String(selected.targetMode) !== "all" && !sensitive && enoughContext;
-  const type = approved ? "wechat_send" : "wechat_draft";
+  const automaticSend = settings.approval === false;
+  const type = automaticSend ? "wechat_send" : "wechat_draft";
   const payload = {
-    contact: contact.name, message: response, sendApproved: approved, source: "auto_reply",
+    contact: contact.name, message: response, sendApproved: automaticSend, source: "auto_reply",
     planId: selected.id, inboundFingerprint: fingerprint,
     safety: {
-      requestedAutomaticSend: settings.approval === false,
-      forcedReview: !approved,
-      reason: sensitive ? "sensitive_message" : !enoughContext ? "insufficient_context" : String(selected.targetMode) === "all" ? "all_contacts_requires_review" : "",
+      approvalRequired: !automaticSend,
+      trigger: event.kind,
     },
   };
-  await env.DB.prepare("INSERT INTO automation_jobs(workspace_id,device_id,type,payload,status) VALUES(?,?,?,?,'queued')").bind(job.workspaceId, job.deviceId, type, JSON.stringify(payload)).run();
-  await env.DB.prepare("UPDATE private_inbound_messages SET response=?,status=?,replied_at=CURRENT_TIMESTAMP WHERE fingerprint=?").bind(response,approved?"queued_send":"queued_review",fingerprint).run();
+  await env.DB.prepare("INSERT INTO automation_jobs(workspace_id,device_id,type,payload,status) VALUES(?,?,?,?,'queued')").bind(workspaceId, deviceId, type, JSON.stringify(payload)).run();
+  await env.DB.prepare("UPDATE private_inbound_messages SET response=?,status=? WHERE fingerprint=?").bind(response,automaticSend?"queued_send":"queued_review",fingerprint).run();
+}
+
+async function handleInboxResult(jobId: number, status: string) {
+  if (status !== "succeeded") return;
+  const job = await env.DB.prepare("SELECT workspace_id AS workspaceId,device_id AS deviceId,result FROM automation_jobs WHERE id=? AND type='wechat_inbox_scan'").bind(jobId).first<{ workspaceId: number; deviceId: string; result: string }>();
+  if (!job) return;
+  const result = jsonValue(job.result, {}) as Record<string, unknown>;
+  if (result.unread !== true) return;
+  for (const event of incomingWechatEvents(result)) await queueInboundReply(job.workspaceId, String(job.deviceId || ""), event);
 }
 
 async function advancePrivateRun(jobId: number, status: string, error: string) {
@@ -343,12 +374,14 @@ async function advanceWorkflowRun(jobId: number, workspaceId: number, deviceId: 
 
 async function advanceInboundReply(jobId: number, status: string, error: string) {
   if (status !== "succeeded" && status !== "failed") return;
-  const job = await env.DB.prepare("SELECT workspace_id AS workspaceId,payload FROM automation_jobs WHERE id=? AND type IN ('wechat_send','wechat_draft')").bind(jobId).first<{ workspaceId: number; payload: string }>();
+  const job = await env.DB.prepare("SELECT workspace_id AS workspaceId,payload,result FROM automation_jobs WHERE id=? AND type IN ('wechat_send','wechat_draft','wechat_ai_reply')").bind(jobId).first<{ workspaceId: number; payload: string; result: string }>();
   if (!job) return;
   const payload = jsonValue(job.payload, {}) as Record<string, unknown>; const fingerprint = String(payload.inboundFingerprint || "");
   if (!fingerprint) return;
-  await env.DB.prepare("UPDATE private_inbound_messages SET status=?,replied_at=CURRENT_TIMESTAMP WHERE fingerprint=?")
-    .bind(status === "succeeded" ? (payload.sendApproved ? "sent" : "drafted") : `failed:${error.slice(0,180)}`, fingerprint).run();
+  const result = jsonValue(job.result, {}) as Record<string, unknown>;
+  const response = String(result.message || "").trim();
+  await env.DB.prepare("UPDATE private_inbound_messages SET status=?,response=CASE WHEN ?<>'' THEN ? ELSE response END,replied_at=CURRENT_TIMESTAMP WHERE fingerprint=?")
+    .bind(status === "succeeded" ? (payload.sendApproved ? "sent" : "drafted") : `failed:${error.slice(0,180)}`, response, response, fingerprint).run();
 }
 
 async function advanceAcquisitionTask(jobId: number, status: string) {
