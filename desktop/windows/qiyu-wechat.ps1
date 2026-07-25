@@ -188,6 +188,10 @@ function Get-WeChatProbe {
 }
 
 function Start-WeChat {
+  # A closed chat shell can leave only the account process running.  Starting
+  # WeChat again recreates the UI asynchronously, so remember that this call
+  # triggered a launch and let the confirmation recovery wait for it to render.
+  $script:WeChatLaunchRequested = $false
   $process = Find-WeChatProcess
   if ($process) { return $process }
   $paths = @(Get-WeChatLaunchPaths); $started = $false
@@ -198,6 +202,7 @@ function Start-WeChat {
   if (-not $started) {
     foreach ($protocol in @("weixin://", "wechat://")) { try { Start-Process $protocol -ErrorAction Stop | Out-Null; $started = $true; break } catch {} }
   }
+  if ($started) { $script:WeChatLaunchRequested = $true }
   for ($index = 0; $index -lt 20; $index++) {
     Start-Sleep -Milliseconds 500
     $process = Find-WeChatProcess
@@ -215,7 +220,11 @@ function Confirm-WeChatEntryIfNeeded {
   # window instead of the chat shell.  Treat that as a recoverable state: click
   # the explicit confirmation button and wait for the real window to replace it.
   $clicked = $false
-  for ($attempt = 0; $attempt -lt 12; $attempt++) {
+  # When this invocation launched WeChat, its account-confirmation dialog is
+  # often created after the first visible window handle.  Poll only in that
+  # recovery path; routine automation against an already open chat stays fast.
+  $maxAttempts = if ($script:WeChatLaunchRequested) { 18 } else { 2 }
+  for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
     $process = Find-WeChatProcess
     if (-not $process) { return $clicked }
     $process.Refresh()
@@ -226,7 +235,13 @@ function Confirm-WeChatEntryIfNeeded {
     }
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
     $entry = if ($root) { Find-ByName $root @("进入微信", "Enter WeChat") } else { $null }
-    if (-not $entry) { return $clicked }
+    if (-not $entry) {
+      if ($script:WeChatLaunchRequested -and -not $clicked -and $attempt -lt ($maxAttempts - 1)) {
+        Start-Sleep -Milliseconds 350
+        continue
+      }
+      return $clicked
+    }
     [QiyuWindow]::ShowWindowAsync($handle, 9) | Out-Null
     [QiyuWindow]::BringWindowToTop($handle) | Out-Null
     [QiyuWindow]::SetForegroundWindow($handle) | Out-Null
