@@ -209,8 +209,42 @@ function Start-WeChat {
   throw "没有找到微信 Windows 版；请从开始菜单手动打开并登录后重试"
 }
 
+function Confirm-WeChatEntryIfNeeded {
+  # Closing the visible WeChat window may leave the account process alive.  A
+  # subsequent launch then presents the small "进入微信" account-confirmation
+  # window instead of the chat shell.  Treat that as a recoverable state: click
+  # the explicit confirmation button and wait for the real window to replace it.
+  $clicked = $false
+  for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    $process = Find-WeChatProcess
+    if (-not $process) { return $clicked }
+    $process.Refresh()
+    $handle = [IntPtr]$process.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero) {
+      Start-Sleep -Milliseconds 350
+      continue
+    }
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    $entry = if ($root) { Find-ByName $root @("进入微信", "Enter WeChat") } else { $null }
+    if (-not $entry) { return $clicked }
+    [QiyuWindow]::ShowWindowAsync($handle, 9) | Out-Null
+    [QiyuWindow]::BringWindowToTop($handle) | Out-Null
+    [QiyuWindow]::SetForegroundWindow($handle) | Out-Null
+    if (-not (Click-ElementCenter $entry)) { throw '检测到微信账户确认页，但无法点击“进入微信”' }
+    $clicked = $true
+    Start-Sleep -Milliseconds 900
+  }
+  if ($clicked) { throw '已点击“进入微信”，但主聊天窗口未在预期时间内恢复' }
+  return $false
+}
+
 function Activate-WeChat {
   $process = Start-WeChat
+  Confirm-WeChatEntryIfNeeded | Out-Null
+  # The confirmation dialog can be a different top-level window from the
+  # restored chat shell, so resolve the active WeChat process again afterwards.
+  $process = Find-WeChatProcess
+  if (-not $process) { throw "微信账户确认后没有找到主聊天窗口" }
   $process.Refresh()
   $handle = [IntPtr]$process.MainWindowHandle
   if ($handle -eq [IntPtr]::Zero) { throw "微信主窗口不可用，请从托盘恢复微信后重试" }
@@ -286,6 +320,19 @@ function Click-Element($Element) {
     if ($rectangle.Width -gt 2 -and $rectangle.Height -gt 2) {
       [QiyuMouse]::Click([int]($rectangle.X + $rectangle.Width / 2), [int]($rectangle.Y + $rectangle.Height / 2))
       return $true
+    }
+  } catch {}
+  return $false
+}
+
+function Click-ElementCenter($Element) {
+  # Some WeChat account-confirmation controls expose InvokePattern but ignore
+  # it. This helper intentionally uses a foreground physical click instead.
+  if (-not $Element) { return $false }
+  try {
+    $rectangle = $Element.Current.BoundingRectangle
+    if ($rectangle.Width -gt 2 -and $rectangle.Height -gt 2) {
+      return [QiyuKeyboard]::ClickScreen([int]($rectangle.X + $rectangle.Width / 2), [int]($rectangle.Y + $rectangle.Height / 2))
     }
   } catch {}
   return $false

@@ -26,7 +26,7 @@ test("shows direct Mac and Windows downloads in the homepage first screen", asyn
   await access(new URL("public/og.png", root));
 });
 
-test("packages the Mac and Windows automation adapters in the 0.5.22 desktop assistant", async () => {
+test("packages the Mac and Windows automation adapters in the 0.5.23 desktop assistant", async () => {
   const [packageText, agentText, helperText, windowsHelperText, releaseScriptText] = await Promise.all([
     readFile(new URL("package.json", root), "utf8"),
     readFile(new URL("desktop/agent.cjs", root), "utf8"),
@@ -36,7 +36,7 @@ test("packages the Mac and Windows automation adapters in the 0.5.22 desktop ass
   ]);
   const packageJson = JSON.parse(packageText);
 
-  assert.equal(packageJson.version, "0.5.22");
+  assert.equal(packageJson.version, "0.5.23");
   assert.equal(packageJson.build.afterPack, "desktop/after-pack.cjs");
   assert.deepEqual(packageJson.build.asarUnpack, ["desktop/bin/**", "desktop/windows/**"]);
   assert.match(agentText, /"wechat_contact_scan"/);
@@ -60,6 +60,9 @@ test("packages the Mac and Windows automation adapters in the 0.5.22 desktop ass
   assert.match(windowsHelperText, /forced_contacts_rail_click/);
   assert.match(windowsHelperText, /ShowWindowAsync/);
   assert.match(windowsHelperText, /SetForegroundWindow/);
+  assert.match(windowsHelperText, /Confirm-WeChatEntryIfNeeded/);
+  assert.match(windowsHelperText, /Click-ElementCenter \$entry/);
+  assert.match(windowsHelperText, /"进入微信", "Enter WeChat"/);
   assert.match(windowsHelperText, /CONTACTS_VIEW_NOT_CONFIRMED/);
   assert.doesNotMatch(windowsHelperText, /Click-Element \$target/);
   assert.doesNotMatch(windowsHelperText, /RootElement\]::RootElement\.FindFirst/);
