@@ -187,78 +187,113 @@ function Get-WeChatProbe {
   return @{ ok = $true; installed = ($paths.Count -gt 0 -or $appIds.Count -gt 0); running = [bool]$running; windowReady = [bool]$visible; processName = if ($running) { $running.ProcessName } else { "" }; executable = if ($paths.Count -gt 0) { $paths[0] } else { "" }; message = $message }
 }
 
-function Start-WeChat {
-  # A closed chat shell can leave only the account process running.  Starting
-  # WeChat again recreates the UI asynchronously, so remember that this call
-  # triggered a launch and let the confirmation recovery wait for it to render.
-  $script:WeChatLaunchRequested = $false
-  $process = Find-WeChatProcess
-  if ($process) { return $process }
-  $paths = @(Get-WeChatLaunchPaths); $started = $false
-  foreach ($launchPath in $paths) { try { Start-Process -FilePath $launchPath -ErrorAction Stop | Out-Null; $started = $true; break } catch {} }
-  if (-not $started) {
-    foreach ($appId in (Get-WeChatStartAppIds)) { try { Start-Process "shell:AppsFolder\$appId" -ErrorAction Stop | Out-Null; $started = $true; break } catch {} }
-  }
-  if (-not $started) {
-    foreach ($protocol in @("weixin://", "wechat://")) { try { Start-Process $protocol -ErrorAction Stop | Out-Null; $started = $true; break } catch {} }
-  }
-  if ($started) { $script:WeChatLaunchRequested = $true }
-  for ($index = 0; $index -lt 20; $index++) {
-    Start-Sleep -Milliseconds 500
+function Wait-ForWeChatWindow([int]$Attempts = 18) {
+  for ($index = 0; $index -lt $Attempts; $index++) {
     $process = Find-WeChatProcess
     if ($process) { return $process }
+    Start-Sleep -Milliseconds 350
   }
-  $background = Find-WeChatProcess -IncludeBackground
-  if ($background) { throw "已发现微信后台进程，但没有可操作的主窗口；请从系统托盘恢复微信或重新登录" }
-  if ($paths.Count -gt 0) { throw "已找到微信安装文件但 10 秒内没有打开主窗口：$($paths[0])" }
-  throw "没有找到微信 Windows 版；请从开始菜单手动打开并登录后重试"
+  return $null
 }
 
-function Confirm-WeChatEntryIfNeeded {
-  # Closing the visible WeChat window may leave the account process alive.  A
-  # subsequent launch then presents the small "进入微信" account-confirmation
-  # window instead of the chat shell.  Treat that as a recoverable state: click
-  # the explicit confirmation button and wait for the real window to replace it.
-  $clicked = $false
-  # When this invocation launched WeChat, its account-confirmation dialog is
-  # often created after the first visible window handle.  Poll only in that
-  # recovery path; routine automation against an already open chat stays fast.
-  $maxAttempts = if ($script:WeChatLaunchRequested) { 18 } else { 2 }
-  for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
-    $process = Find-WeChatProcess
-    if (-not $process) { return $clicked }
-    $process.Refresh()
-    $handle = [IntPtr]$process.MainWindowHandle
-    if ($handle -eq [IntPtr]::Zero) {
-      Start-Sleep -Milliseconds 350
-      continue
-    }
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-    $entry = if ($root) { Find-ByName $root @("进入微信", "Enter WeChat") } else { $null }
-    if (-not $entry) {
-      if ($script:WeChatLaunchRequested -and -not $clicked -and $attempt -lt ($maxAttempts - 1)) {
-        Start-Sleep -Milliseconds 350
-        continue
-      }
-      return $clicked
-    }
-    [QiyuWindow]::ShowWindowAsync($handle, 9) | Out-Null
-    [QiyuWindow]::BringWindowToTop($handle) | Out-Null
-    [QiyuWindow]::SetForegroundWindow($handle) | Out-Null
-    if (-not (Click-ElementCenter $entry)) { throw '检测到微信账户确认页，但无法点击“进入微信”' }
-    $clicked = $true
-    Start-Sleep -Milliseconds 900
+function Test-SystemTrayElement($Element) {
+  if (-not $Element) { return $false }
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $node = $Element
+  for ($index = 0; $index -lt 8 -and $node; $index++) {
+    try {
+      if (@("TrayNotifyWnd", "NotifyIconOverflowWindow", "ToolbarWindow32") -contains [string]$node.Current.ClassName) { return $true }
+      $node = $walker.GetParent($node)
+    } catch { return $false }
   }
-  if ($clicked) { throw '已点击“进入微信”，但主聊天窗口未在预期时间内恢复' }
   return $false
 }
 
-function Activate-WeChat {
-  $process = Start-WeChat
-  Confirm-WeChatEntryIfNeeded | Out-Null
-  # The confirmation dialog can be a different top-level window from the
-  # restored chat shell, so resolve the active WeChat process again afterwards.
+function Find-WeChatTrayIcon {
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  if (-not $root) { return $null }
+  try {
+    $elements = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      $name = ""
+      try { $name = ([string]$element.Current.Name -replace "\s+", " ").Trim() } catch {}
+      if ($name -notmatch "^(微信|WeChat|Weixin)(\s|$|，|,|：|:)") { continue }
+      if (-not (Test-SystemTrayElement $element)) { continue }
+      $rect = $element.Current.BoundingRectangle
+      if ($rect.Width -gt 4 -and $rect.Height -gt 4) { return $element }
+    }
+  } catch {}
+  return $null
+}
+
+function Expand-HiddenTrayIcons {
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  if (-not $root) { return $false }
+  try {
+    $elements = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($element in $elements) {
+      $name = ""
+      try { $name = ([string]$element.Current.Name) } catch {}
+      if ($name -notmatch "显示隐藏的图标|Show hidden icons") { continue }
+      if (Click-ElementCenter $element) { Start-Sleep -Milliseconds 400; return $true }
+    }
+  } catch {}
+  return $false
+}
+
+function Restore-WeChatFromTray {
+  # The normal Windows "close" behavior hides WeChat in the notification area.
+  # Restore that existing signed-in instance.  Do not start an executable here:
+  # launching a second instance is what creates the unwanted login window.
+  for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    $icon = Find-WeChatTrayIcon
+    if (-not $icon -and $attempt -eq 0) { Expand-HiddenTrayIcons | Out-Null; $icon = Find-WeChatTrayIcon }
+    if ($icon) {
+      if (-not (Click-ElementCenter $icon)) { return $null }
+      Start-Sleep -Milliseconds 140
+      Click-ElementCenter $icon | Out-Null
+      $process = Wait-ForWeChatWindow 20
+      if ($process) { return $process }
+    }
+    Start-Sleep -Milliseconds 450
+  }
+  return $null
+}
+
+function Launch-WeChatOnlyWhenAbsent {
+  # A fresh launch is allowed only when no WeChat/Weixin process exists at all.
+  # This prevents automation from opening an additional login instance for an
+  # already signed-in account that the user merely closed to the system tray.
+  if (Find-WeChatProcess -IncludeBackground) { throw "WECHAT_BACKGROUND_WINDOW_CLOSED" }
+  $paths = @(Get-WeChatLaunchPaths)
+  foreach ($launchPath in $paths) {
+    try { Start-Process -FilePath $launchPath -ErrorAction Stop | Out-Null; break } catch {}
+  }
+  if (-not (Find-WeChatProcess -IncludeBackground)) {
+    foreach ($appId in (Get-WeChatStartAppIds)) { try { Start-Process "shell:AppsFolder\$appId" -ErrorAction Stop | Out-Null; break } catch {} }
+  }
+  if (-not (Find-WeChatProcess -IncludeBackground)) {
+    foreach ($protocol in @("weixin://", "wechat://")) { try { Start-Process $protocol -ErrorAction Stop | Out-Null; break } catch {} }
+  }
+  $process = Wait-ForWeChatWindow 28
+  if ($process) { return $process }
+  if (Find-WeChatProcess -IncludeBackground) { throw "WECHAT_LOGIN_REQUIRED" }
+  throw "WECHAT_NOT_FOUND"
+}
+
+function Resolve-WeChatWindow {
   $process = Find-WeChatProcess
+  if ($process) { return $process }
+  if (Find-WeChatProcess -IncludeBackground) {
+    $restored = Restore-WeChatFromTray
+    if ($restored) { return $restored }
+    throw "WECHAT_BACKGROUND_WINDOW_CLOSED"
+  }
+  return Launch-WeChatOnlyWhenAbsent
+}
+
+function Activate-WeChat {
+  $process = Resolve-WeChatWindow
   if (-not $process) { throw "微信账户确认后没有找到主聊天窗口" }
   $process.Refresh()
   $handle = [IntPtr]$process.MainWindowHandle
